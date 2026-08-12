@@ -4,11 +4,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const allowedPrecachePaths = [
   /^\/assets\//,
-  /^\/fonts\//,
   /^\/icons\//,
   /^\/sounds\//,
   /^\/favicon\.svg$/,
   /^\/logo\.svg$/,
+  /^\/favicon\.png$/,
+  /^\/logo\.png$/,
   /^\/manifest\.webmanifest$/,
   /^\/offline\.html$/
 ];

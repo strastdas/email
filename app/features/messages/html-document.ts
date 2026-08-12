@@ -8,7 +8,7 @@ export function buildEmailHtmlDocument(input: {
 }): string {
   const origin = new URL(input.origin).origin;
   const imageSources = input.allowRemoteImages ? `${origin} https: http:` : origin;
-  const policy = `default-src 'none'; img-src ${imageSources}; font-src ${origin}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
+  const policy = `default-src 'none'; img-src ${imageSources}; font-src ${origin} https://cdn.strast.dev; style-src 'unsafe-inline' https://cdn.strast.dev; base-uri 'none'; form-action 'none'`;
   return `<!doctype html><html data-theme="${input.theme}"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}"><meta name="referrer" content="no-referrer"><meta name="color-scheme" content="${input.theme}"><style>${baseStyles(input.theme)}</style></head><body>${input.html}</body></html>`;
 }
 
@@ -31,11 +31,11 @@ function baseStyles(theme: AppTheme): string {
         };
 
   return `
-  @font-face { font-family: "Geist Sans"; src: url("/fonts/Geist-Regular.woff2") format("woff2"); font-style: normal; font-weight: 400; font-display: swap; }
+  @font-face { font-family: "lilgrotesk"; src: url("https://cdn.strast.dev/fonts/lilgrotesk/LilGrotesk-Regular.woff2") format("woff2"); font-style: normal; font-weight: 400; font-display: swap; }
   :root { color-scheme: ${theme}; }
   * { box-sizing: border-box; }
   html { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; background: transparent; }
-  body { margin: 0; padding: 0; background: transparent; color: ${palette.foreground}; font-family: "Geist Sans", ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.55; }
+  body { margin: 0; padding: 0; background: transparent; color: ${palette.foreground}; font-family: "lilgrotesk", ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.55; }
   a { color: ${palette.link}; }
   blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid ${palette.quoteBorder}; }
 `;
