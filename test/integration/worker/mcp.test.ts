@@ -1,15 +1,8 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import initialMigration from "../../../migrations/0001_initial.sql?raw";
-import workspaceMigration from "../../../migrations/0002_workspace.sql?raw";
-import oauthResourcesMigration from "../../../migrations/0003_oauth_resources.sql?raw";
-import conversationMigration from "../../../migrations/0004_conversations.sql?raw";
-import threadRebuildMigration from "../../../migrations/0005_rebuild_threads.sql?raw";
-import userOnboardingMigration from "../../../migrations/0008_user_onboarding.sql?raw";
-import loginEmailDomainMigration from "../../../migrations/0009_login_email_domain_isolation.sql?raw";
 import { hashOAuthToken } from "../../../worker/auth/oauth-token";
-import { migrationStatements } from "./migration-statements";
+import { applyCurrentMigrations } from "./current-migrations";
 
 const origin = "https://hqbase.test";
 const userId = "usr_mcp_member";
@@ -29,17 +22,7 @@ const readToolNames = [
 
 describe("HQBase MCP server", () => {
   beforeAll(async () => {
-    for (const migration of [
-      initialMigration,
-      workspaceMigration,
-      oauthResourcesMigration,
-      conversationMigration,
-      threadRebuildMigration,
-      userOnboardingMigration,
-      loginEmailDomainMigration
-    ]) {
-      await applyMigration(migration);
-    }
+    await applyCurrentMigrations();
     const now = new Date();
     const storedReadToken = await hashOAuthToken("mcp-hqbase-read-token");
     const storedReadProfileFullToken = await hashOAuthToken("mcp-hqbase-read-profile-full-token");
@@ -209,7 +192,7 @@ describe("HQBase MCP server", () => {
     });
   });
 
-  it("defaults dynamic registration to read and permits explicit mail-action scopes", async () => {
+  it("registers the allowed scope capabilities while authorization still starts read-only", async () => {
     const metadataResponse = await SELF.fetch(
       `${origin}/.well-known/oauth-authorization-server/api/auth`
     );
@@ -228,7 +211,9 @@ describe("HQBase MCP server", () => {
     });
     expect(registration.status).toBe(201);
     const registered = (await registration.json()) as { scope?: string };
-    expect(registered.scope?.split(" ")).toEqual(["mail:read"]);
+    expect(registered.scope?.split(" ").sort()).toEqual(
+      ["mail:read", "mail:write", "mail:send", "offline_access"].sort()
+    );
 
     const fullRegistration = await SELF.fetch(metadata.registration_endpoint ?? "", {
       body: JSON.stringify({
@@ -242,7 +227,9 @@ describe("HQBase MCP server", () => {
     });
     expect(fullRegistration.status).toBe(201);
     const fullRegistered = (await fullRegistration.json()) as { scope?: string };
-    expect(fullRegistered.scope?.split(" ").sort()).toEqual([...fullScopes].sort());
+    expect(fullRegistered.scope?.split(" ").sort()).toEqual(
+      [...fullScopes, "offline_access"].sort()
+    );
   });
 
   it("publishes distinct OAuth resource metadata and scope challenges", async () => {
@@ -504,10 +491,4 @@ function mcpRequest(body: unknown, accessToken?: string, endpoint = "/mcp"): Pro
     headers,
     method: "POST"
   });
-}
-
-async function applyMigration(source: string): Promise<void> {
-  for (const statement of migrationStatements(source)) {
-    await env.DB.prepare(statement).run();
-  }
 }

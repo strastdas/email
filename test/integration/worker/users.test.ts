@@ -1,36 +1,15 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import initialMigration from "../../../migrations/0001_initial.sql?raw";
-import workspaceMigration from "../../../migrations/0002_workspace.sql?raw";
-import oauthResourcesMigration from "../../../migrations/0003_oauth_resources.sql?raw";
-import conversationMigration from "../../../migrations/0004_conversations.sql?raw";
-import threadRebuildMigration from "../../../migrations/0005_rebuild_threads.sql?raw";
-import pushMigration from "../../../migrations/0006_push_notifications.sql?raw";
-import userMailPreferencesMigration from "../../../migrations/0007_user_mail_preferences.sql?raw";
-import userOnboardingMigration from "../../../migrations/0008_user_onboarding.sql?raw";
-import loginEmailDomainMigration from "../../../migrations/0009_login_email_domain_isolation.sql?raw";
 import { createAuth } from "../../../worker/auth/auth";
-import { migrationStatements } from "./migration-statements";
+import { applyCurrentMigrations } from "./current-migrations";
 
 const origin = "https://hqbase.test";
 let ownerCookie = "";
 
 describe("workspace user onboarding", () => {
   beforeAll(async () => {
-    for (const migration of [
-      initialMigration,
-      workspaceMigration,
-      oauthResourcesMigration,
-      conversationMigration,
-      threadRebuildMigration,
-      pushMigration,
-      userMailPreferencesMigration,
-      userOnboardingMigration,
-      loginEmailDomainMigration
-    ]) {
-      await applyMigration(migration);
-    }
+    await applyCurrentMigrations();
 
     const owner = await createAuth(env, new Request(`${origin}/api/auth/sign-up/email`)).handler(
       new Request(`${origin}/api/auth/sign-up/email`, {
@@ -237,9 +216,9 @@ describe("workspace user onboarding", () => {
     )
       .bind(result.user.id)
       .first<{ identifier: string }>();
-    const token = latestVerification?.identifier.replace("reset-password:", "");
-    expect(token).toBeTruthy();
-    expect(token).not.toBe(firstToken);
+    const resentToken = latestVerification?.identifier.replace("reset-password:", "");
+    expect(resentToken).toBeTruthy();
+    expect(resentToken).not.toBe(firstToken);
 
     const invalidated = await SELF.fetch(`${origin}/api/auth/reset-password`, {
       body: JSON.stringify({
@@ -250,6 +229,31 @@ describe("workspace user onboarding", () => {
       method: "POST"
     });
     expect(invalidated.status).toBe(400);
+
+    const recoveryRequest = await requestPasswordReset(
+      "invited-user@gmail.com",
+      `${origin}/reset-password`
+    );
+    expect(recoveryRequest.status).toBe(200);
+    const recoveryVerification = await env.DB.prepare(
+      `SELECT identifier FROM verification
+       WHERE value = ? AND identifier LIKE 'reset-password:%'`
+    )
+      .bind(result.user.id)
+      .first<{ identifier: string }>();
+    const token = recoveryVerification?.identifier.replace("reset-password:", "");
+    expect(token).toBeTruthy();
+    expect(token).not.toBe(resentToken);
+
+    const staleResentLink = await SELF.fetch(`${origin}/api/auth/reset-password`, {
+      body: JSON.stringify({
+        newPassword: "stale-resent-invite-password",
+        token: resentToken
+      }),
+      headers: { "content-type": "application/json", origin },
+      method: "POST"
+    });
+    expect(staleResentLink.status).toBe(400);
 
     const accepted = await SELF.fetch(`${origin}/api/auth/reset-password`, {
       body: JSON.stringify({ newPassword: "invited-user-password-789", token }),
@@ -272,6 +276,13 @@ describe("workspace user onboarding", () => {
       .bind(result.user.id)
       .first<{ outcome: string }>();
     expect(audit?.outcome).toBe("success");
+    const remainingTokens = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM verification
+       WHERE value = ? AND identifier LIKE 'reset-password:%'`
+    )
+      .bind(result.user.id)
+      .first<{ count: number }>();
+    expect(remainingTokens?.count).toBe(0);
     await expect(signIn("invited-user@gmail.com", "invited-user-password-789")).resolves.toContain(
       "better-auth.session_token"
     );
@@ -282,6 +293,181 @@ describe("workspace user onboarding", () => {
       method: "POST"
     });
     expect(replay.status).toBe(400);
+  });
+
+  it("recovers a pending temporary-password account and completes its setup", async () => {
+    const created = await createUser({
+      email: "pending-recovery-user@gmail.com",
+      method: "temporary_password",
+      name: "Pending Recovery User",
+      role: "member"
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const result = (await created.json()) as {
+      temporaryPassword: string;
+      user: { id: string };
+    };
+    const temporaryCookie = await signIn(
+      "pending-recovery-user@gmail.com",
+      result.temporaryPassword
+    );
+
+    const requested = await requestPasswordReset(
+      "pending-recovery-user@gmail.com",
+      `${origin}/reset-password`
+    );
+    expect(requested.status).toBe(200);
+    const verification = await env.DB.prepare(
+      `SELECT identifier FROM verification
+       WHERE value = ? AND identifier LIKE 'reset-password:%'`
+    )
+      .bind(result.user.id)
+      .first<{ identifier: string }>();
+    const token = verification?.identifier.replace("reset-password:", "");
+    expect(token).toBeTruthy();
+
+    const reset = await SELF.fetch(`${origin}/api/auth/reset-password`, {
+      body: JSON.stringify({ newPassword: "pending-recovery-password-123", token }),
+      headers: { "content-type": "application/json", origin },
+      method: "POST"
+    });
+    expect(reset.status, await reset.clone().text()).toBe(200);
+
+    const onboarding = await env.DB.prepare("SELECT status FROM user_onboarding WHERE user_id = ?")
+      .bind(result.user.id)
+      .first<{ status: string }>();
+    expect(onboarding?.status).toBe("complete");
+    const revoked = await SELF.fetch(`${origin}/api/me`, { headers: { cookie: temporaryCookie } });
+    expect(revoked.status).toBe(401);
+    await expect(
+      signIn("pending-recovery-user@gmail.com", result.temporaryPassword)
+    ).rejects.toThrow();
+    await expect(
+      signIn("pending-recovery-user@gmail.com", "pending-recovery-password-123")
+    ).resolves.toContain("better-auth.session_token");
+
+    const audit = await env.DB.prepare(
+      `SELECT outcome FROM audit_events
+       WHERE action = 'user.password.setup' AND resource_id = ?
+       ORDER BY occurred_at DESC LIMIT 1`
+    )
+      .bind(result.user.id)
+      .first<{ outcome: string }>();
+    expect(audit?.outcome).toBe("success");
+  });
+
+  it("resets an established password without revealing account existence", async () => {
+    const created = await createUser({
+      email: "recovery-user@gmail.com",
+      method: "temporary_password",
+      name: "Recovery User",
+      role: "member"
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const result = (await created.json()) as {
+      temporaryPassword: string;
+      user: { id: string };
+    };
+
+    const temporaryCookie = await signIn("recovery-user@gmail.com", result.temporaryPassword);
+    const completed = await SELF.fetch(`${origin}/api/me/password`, {
+      body: JSON.stringify({
+        confirmPassword: "first-recovery-password-123",
+        currentPassword: result.temporaryPassword,
+        newPassword: "first-recovery-password-123"
+      }),
+      headers: { "content-type": "application/json", cookie: temporaryCookie, origin },
+      method: "POST"
+    });
+    expect(completed.status, await completed.clone().text()).toBe(200);
+    const activeCookie = extractSessionCookie(completed);
+
+    const resetDestination = new URL("/reset-password", origin);
+    resetDestination.searchParams.set("returnTo", "/device?user_code=ABCD-EFGH");
+    const existingRequest = await requestPasswordReset(
+      "recovery-user@gmail.com",
+      resetDestination.href
+    );
+    const missingRequest = await requestPasswordReset(
+      "missing-user@gmail.com",
+      resetDestination.href
+    );
+    expect(existingRequest.status).toBe(200);
+    expect(missingRequest.status).toBe(200);
+    await expect(existingRequest.json()).resolves.toEqual(await missingRequest.json());
+
+    const firstVerification = await env.DB.prepare(
+      `SELECT identifier FROM verification
+       WHERE value = ? AND identifier LIKE 'reset-password:%'
+       ORDER BY expiresAt DESC LIMIT 1`
+    )
+      .bind(result.user.id)
+      .first<{ identifier: string }>();
+    const firstToken = firstVerification?.identifier.replace("reset-password:", "");
+    expect(firstToken).toBeTruthy();
+
+    const nextRequest = await requestPasswordReset(
+      "recovery-user@gmail.com",
+      resetDestination.href
+    );
+    expect(nextRequest.status).toBe(200);
+    const verification = await env.DB.prepare(
+      `SELECT identifier FROM verification
+       WHERE value = ? AND identifier LIKE 'reset-password:%'`
+    )
+      .bind(result.user.id)
+      .first<{ identifier: string }>();
+    const token = verification?.identifier.replace("reset-password:", "");
+    expect(token).toBeTruthy();
+    expect(token).not.toBe(firstToken);
+
+    const staleReset = await SELF.fetch(`${origin}/api/auth/reset-password`, {
+      body: JSON.stringify({ newPassword: "stale-recovery-password", token: firstToken }),
+      headers: { "content-type": "application/json", origin },
+      method: "POST"
+    });
+    expect(staleReset.status).toBe(400);
+
+    const callback = await SELF.fetch(
+      `${origin}/api/auth/reset-password/${token}?callbackURL=${encodeURIComponent(resetDestination.href)}`,
+      { redirect: "manual" }
+    );
+    expect(callback.status).toBe(302);
+    const callbackLocation = new URL(callback.headers.get("location") ?? origin);
+    expect(callbackLocation.pathname).toBe("/reset-password");
+    expect(callbackLocation.searchParams.get("returnTo")).toBe("/device?user_code=ABCD-EFGH");
+    expect(callbackLocation.searchParams.get("token")).toBe(token);
+
+    const reset = await SELF.fetch(`${origin}/api/auth/reset-password`, {
+      body: JSON.stringify({ newPassword: "second-recovery-password-456", token }),
+      headers: { "content-type": "application/json", origin },
+      method: "POST"
+    });
+    expect(reset.status, await reset.clone().text()).toBe(200);
+
+    const revoked = await SELF.fetch(`${origin}/api/me`, { headers: { cookie: activeCookie } });
+    expect(revoked.status).toBe(401);
+    await expect(
+      signIn("recovery-user@gmail.com", "first-recovery-password-123")
+    ).rejects.toThrow();
+    await expect(
+      signIn("recovery-user@gmail.com", "second-recovery-password-456")
+    ).resolves.toContain("better-auth.session_token");
+    const audit = await env.DB.prepare(
+      `SELECT outcome FROM audit_events
+       WHERE action = 'user.password.reset' AND resource_id = ?
+       ORDER BY occurred_at DESC LIMIT 1`
+    )
+      .bind(result.user.id)
+      .first<{ outcome: string }>();
+    expect(audit?.outcome).toBe("success");
+    const remainingTokens = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM verification
+       WHERE value = ? AND identifier LIKE 'reset-password:%'`
+    )
+      .bind(result.user.id)
+      .first<{ count: number }>();
+    expect(remainingTokens?.count).toBe(0);
   });
 });
 
@@ -294,6 +480,14 @@ function createUser(input: {
   return SELF.fetch(`${origin}/api/users`, {
     body: JSON.stringify(input),
     headers: { "content-type": "application/json", cookie: ownerCookie, origin },
+    method: "POST"
+  });
+}
+
+function requestPasswordReset(email: string, redirectTo: string): Promise<Response> {
+  return SELF.fetch(`${origin}/api/auth/request-password-reset`, {
+    body: JSON.stringify({ email, redirectTo }),
+    headers: { "content-type": "application/json", origin },
     method: "POST"
   });
 }
@@ -313,10 +507,4 @@ function extractSessionCookie(response: Response): string {
   const match = serialized.match(/(?:^|,\s*)((?:__Secure-)?better-auth\.session_token=[^;,]+)/);
   if (!match?.[1]) throw new Error("Session cookie was not returned.");
   return match[1];
-}
-
-async function applyMigration(source: string): Promise<void> {
-  for (const statement of migrationStatements(source)) {
-    await env.DB.prepare(statement).run();
-  }
 }
