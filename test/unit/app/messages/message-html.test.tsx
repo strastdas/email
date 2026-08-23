@@ -25,9 +25,12 @@ describe("message HTML view", () => {
     });
 
     expect(blocked).toContain("img-src https://mail.example.com;");
-    expect(blocked).toContain("font-src https://mail.example.com;");
-    expect(blocked).toContain('font-family: "Geist Sans"');
-    expect(blocked).toContain('url("/fonts/Geist-Regular.woff2")');
+    expect(blocked).toContain("font-src https://mail.example.com https://cdn.strast.dev;");
+    expect(blocked).toContain("style-src 'unsafe-inline' https://cdn.strast.dev;");
+    expect(blocked).toContain('font-family: "lilgrotesk"');
+    expect(blocked).toContain(
+      'url("https://cdn.strast.dev/fonts/lilgrotesk/LilGrotesk-Regular.woff2")'
+    );
     expect(blocked).toContain('data-theme="dark"');
     expect(blocked).toContain("background: transparent");
     expect(blocked).toContain("color: #f2f2f2");

@@ -9,6 +9,8 @@ import threadRebuildMigration from "../../../migrations/0005_rebuild_threads.sql
 import userMailPreferencesMigration from "../../../migrations/0007_user_mail_preferences.sql?raw";
 import userOnboardingMigration from "../../../migrations/0008_user_onboarding.sql?raw";
 import loginEmailDomainMigration from "../../../migrations/0009_login_email_domain_isolation.sql?raw";
+import deviceAuthorizationMigration from "../../../migrations/0010_oauth_device_authorization.sql?raw";
+import latestPasswordResetTokenMigration from "../../../migrations/0011_latest_password_reset_token.sql?raw";
 import { createAuth } from "../../../worker/auth/auth";
 import { migrationStatements } from "./migration-statements";
 
@@ -34,7 +36,24 @@ describe("Better Auth schema", () => {
       env.DB.prepare(
         `INSERT INTO mail_domains (id, name, created_at, updated_at)
          VALUES ('dom_legacy', 'example.com', ?, ?)`
-      ).bind(now, now)
+      ).bind(now, now),
+      env.DB.prepare(
+        `INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt)
+         VALUES
+           ('verification_reset_old', 'reset-password:old', 'usr_legacy', ?, ?, ?),
+           ('verification_reset_new', 'reset-password:new', 'usr_legacy', ?, ?, ?),
+           ('verification_other', 'email-verification:keep', 'usr_legacy', ?, ?, ?)`
+      ).bind(
+        "2026-08-22T00:00:00.000Z",
+        "2026-08-14T00:00:00.000Z",
+        "2026-08-14T00:00:00.000Z",
+        "2026-08-22T00:00:00.000Z",
+        "2026-08-15T00:00:00.000Z",
+        "2026-08-15T00:00:00.000Z",
+        "2026-08-22T00:00:00.000Z",
+        "2026-08-14T00:00:00.000Z",
+        "2026-08-14T00:00:00.000Z"
+      )
     ]);
 
     await applyMigration(oauthResourcesMigration);
@@ -43,6 +62,8 @@ describe("Better Auth schema", () => {
     await applyMigration(userMailPreferencesMigration);
     await applyMigration(userOnboardingMigration);
     await applyMigration(loginEmailDomainMigration);
+    await applyMigration(deviceAuthorizationMigration);
+    await applyMigration(latestPasswordResetTokenMigration);
   });
 
   it("backfills the Better Auth 1.7 account identity without losing credential rows", async () => {
@@ -88,6 +109,37 @@ describe("Better Auth schema", () => {
     ]);
   });
 
+  it("keeps only the newest existing password link and installs the replacement trigger", async () => {
+    const migrated = await env.DB.prepare(
+      `SELECT id FROM verification
+       WHERE value = 'usr_legacy'
+       ORDER BY id`
+    ).all<{ id: string }>();
+    expect(migrated.results.map(({ id }) => id)).toEqual([
+      "verification_other",
+      "verification_reset_new"
+    ]);
+
+    const trigger = await env.DB.prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'trigger' AND name = 'verification_latest_password_reset_token'`
+    ).first<{ name: string }>();
+    expect(trigger?.name).toBe("verification_latest_password_reset_token");
+
+    await env.DB.prepare(
+      `INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt)
+       VALUES ('verification_reset_latest', 'reset-password:latest', 'usr_legacy', ?, ?, ?)`
+    )
+      .bind("2026-08-23T00:00:00.000Z", "2026-08-16T00:00:00.000Z", "2026-08-16T00:00:00.000Z")
+      .run();
+
+    const resetTokens = await env.DB.prepare(
+      `SELECT id FROM verification
+       WHERE value = 'usr_legacy' AND identifier LIKE 'reset-password:%'`
+    ).all<{ id: string }>();
+    expect(resetTokens.results).toEqual([{ id: "verification_reset_latest" }]);
+  });
+
   it("applies the conversation draft migration on an existing schema", async () => {
     const columns = await env.DB.prepare("PRAGMA table_info(drafts)").all<{ name: string }>();
     expect(columns.results.map((column) => column.name)).toContain("forward_of_message_id");
@@ -117,6 +169,34 @@ describe("Better Auth schema", () => {
       "SELECT status FROM user_onboarding WHERE user_id = 'usr_legacy'"
     ).first();
     expect(onboarding).toBeNull();
+  });
+
+  it("adds the OAuth device-code schema without changing existing accounts", async () => {
+    const clientColumns = await env.DB.prepare("PRAGMA table_info(oauthClient)").all<{
+      name: string;
+    }>();
+    expect(clientColumns.results.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["clientDiscoveryId", "clientCredentialsScopes", "applicationType"])
+    );
+    const columns = await env.DB.prepare("PRAGMA table_info(deviceCode)").all<{ name: string }>();
+    expect(columns.results.map((column) => column.name)).toEqual([
+      "id",
+      "deviceCode",
+      "userCode",
+      "userId",
+      "expiresAt",
+      "status",
+      "lastPolledAt",
+      "pollingInterval",
+      "clientId",
+      "scope",
+      "resources",
+      "oauthClientId",
+      "sessionId"
+    ]);
+    await expect(
+      env.DB.prepare('SELECT email FROM "user" WHERE id = ?').bind("usr_legacy").first()
+    ).resolves.toMatchObject({ email: "legacy@example.com" });
   });
 
   it("stores and returns the signed-in user's default From mailbox", async () => {

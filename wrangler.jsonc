@@ -9,7 +9,15 @@
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/mcp", "/mcp/*", "/.well-known/*"]
+    "run_worker_first": [
+      "/api/*",
+      "/mcp",
+      "/mcp/*",
+      "/.well-known/*",
+      "/skills/hqbase-mail/SKILL.md",
+      "/AGENTS.md",
+      "/agents.md"
+    ]
   },
   "observability": {
     "enabled": true,
@@ -32,7 +40,8 @@
   "r2_buckets": [
     {
       "binding": "MAIL_OBJECTS",
-      "bucket_name": "mail","preview_bucket_name": "mail"
+      "bucket_name": "mail",
+      "preview_bucket_name": "mail"
     }
   ],
   "queues": {

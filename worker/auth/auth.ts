@@ -1,4 +1,4 @@
-import { oauthProvider } from "@better-auth/oauth-provider";
+import { oauthDeviceAuthorization, oauthProvider } from "@better-auth/oauth-provider";
 import { betterAuth } from "better-auth";
 import { admin } from "better-auth/plugins";
 import { recordAudit } from "../features/audit/service";
@@ -9,8 +9,13 @@ import { hashOAuthToken } from "./oauth-token";
 import { completePasswordSetup } from "./password-setup";
 
 const passwordSetupTokenLifetimeSeconds = 7 * 24 * 60 * 60;
+type BackgroundTaskHandler = (promise: Promise<unknown>) => void;
 
-export function createAuth(env: WorkerEnv, request: Request) {
+export function createAuth(
+  env: WorkerEnv,
+  request: Request,
+  backgroundTaskHandler?: BackgroundTaskHandler
+) {
   const baseURL = authOrigin(env, request);
 
   return betterAuth({
@@ -20,6 +25,14 @@ export function createAuth(env: WorkerEnv, request: Request) {
     database: env.DB,
     disabledPaths: ["/token"],
     secret: env.BETTER_AUTH_SECRET,
+    ...(backgroundTaskHandler
+      ? { advanced: { backgroundTasks: { handler: backgroundTaskHandler } } }
+      : {}),
+    account: {
+      fields: {
+        accountId: "providerAccountId"
+      }
+    },
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 8,
@@ -31,18 +44,17 @@ export function createAuth(env: WorkerEnv, request: Request) {
         await sendPasswordSetupEmail(env, { user, url });
       },
       onPasswordReset: async ({ user }) => {
-        if (await completePasswordSetup(env.DB, user.id)) {
-          await recordAudit(env.DB, {
-            correlationId: crypto.randomUUID(),
-            actorType: "user",
-            actorId: user.id,
-            action: "user.password.setup",
-            resourceType: "user",
-            resourceId: user.id,
-            outcome: "success",
-            metadata: {}
-          });
-        }
+        const completedSetup = await completePasswordSetup(env.DB, user.id);
+        await recordAudit(env.DB, {
+          correlationId: crypto.randomUUID(),
+          actorType: "user",
+          actorId: user.id,
+          action: completedSetup ? "user.password.setup" : "user.password.reset",
+          resourceType: "user",
+          resourceId: user.id,
+          outcome: "success",
+          metadata: {}
+        });
       }
     },
     plugins: [
@@ -62,9 +74,14 @@ export function createAuth(env: WorkerEnv, request: Request) {
       oauthProvider({
         allowDynamicClientRegistration: true,
         allowUnauthenticatedClientRegistration: true,
+        clientRegistrationAllowedResources: [
+          mcpResource(env, request),
+          mcpFullResource(env, request),
+          mailApiResource(env, request)
+        ],
         clientRegistrationAllowedScopes: ["mail:write", "mail:send", "offline_access"],
         clientRegistrationDefaultScopes: ["mail:read"],
-        consentPage: "/mcp/consent",
+        consentPage: "/oauth/consent",
         disableJwtPlugin: true,
         grantTypes: ["authorization_code", "refresh_token"],
         loginPage: "/",
@@ -75,8 +92,17 @@ export function createAuth(env: WorkerEnv, request: Request) {
         },
         scopes: ["mail:read", "mail:write", "mail:send", "offline_access"],
         storeTokens: { hash: hashOAuthToken },
-        resources: [mcpResource(env, request), mcpFullResource(env, request)],
+        resources: [
+          mcpResource(env, request),
+          mcpFullResource(env, request),
+          mailApiResource(env, request)
+        ],
         enforcePerClientResources: false
+      }),
+      oauthDeviceAuthorization({
+        expiresIn: "15m",
+        interval: "5s",
+        verificationUri: "/device"
       })
     ]
   });
@@ -96,4 +122,8 @@ export function mcpResource(env: WorkerEnv, request: Request): string {
 
 export function mcpFullResource(env: WorkerEnv, request: Request): string {
   return `${authOrigin(env, request)}/mcp/full`;
+}
+
+export function mailApiResource(env: WorkerEnv, request: Request): string {
+  return `${authOrigin(env, request)}/api/v1`;
 }

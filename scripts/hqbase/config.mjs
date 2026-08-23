@@ -21,12 +21,24 @@ export function createWranglerConfig(manifest) {
     $schema: `${rootFromDeployment}/node_modules/wrangler/config-schema.json`,
     name: manifest.worker.name,
     main: `${rootFromDeployment}/worker/index.ts`,
+    // Matches the repository Wrangler configuration: a mail workspace should be
+    // reachable only on its own hostname, not on per-version preview URLs.
+    preview_urls: false,
     compatibility_date: "2026-07-28",
     compatibility_flags: ["nodejs_compat"],
     assets: {
       directory: `${rootFromDeployment}/dist`,
       binding: "ASSETS",
-      not_found_handling: "single-page-application"
+      not_found_handling: "single-page-application",
+      run_worker_first: [
+        "/api/*",
+        "/mcp",
+        "/mcp/*",
+        "/.well-known/*",
+        "/skills/hqbase-mail/SKILL.md",
+        "/AGENTS.md",
+        "/agents.md"
+      ]
     },
     observability: {
       enabled: true,
