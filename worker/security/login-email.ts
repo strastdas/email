@@ -1,9 +1,12 @@
+import { sql } from "drizzle-orm";
+
+import { getRow } from "../db/drizzle";
 import { AppError } from "../lib/errors";
 
 export const LOGIN_EMAIL_DOMAIN_MESSAGE =
   "Use an email account you can always access, even when HQBase is unavailable. It cannot use a domain connected to this workspace.";
 
-export function loginEmailDomain(email: string): string | null {
+function loginEmailDomain(email: string): string | null {
   const normalized = email.trim().toLowerCase();
   const separator = normalized.lastIndexOf("@");
   return separator > 0 && separator < normalized.length - 1
@@ -29,10 +32,10 @@ export async function assertLoginEmailOutsideWorkspace(
 ): Promise<void> {
   const domain = loginEmailDomain(email);
   if (!domain) return;
-  const managed = await db
-    .prepare("SELECT 1 AS matched FROM mail_domains WHERE name = ? LIMIT 1")
-    .bind(domain)
-    .first<{ matched: number }>();
+  const managed = await getRow<{ matched: number }>(
+    db,
+    sql`SELECT 1 AS matched FROM mail_domains WHERE name = ${domain} LIMIT 1`
+  );
   if (managed) {
     throw new AppError("LOGIN_EMAIL_DOMAIN_MANAGED", LOGIN_EMAIL_DOMAIN_MESSAGE, 409);
   }
@@ -43,10 +46,12 @@ export async function assertDomainUnusedByLoginEmails(
   domain: string
 ): Promise<void> {
   const normalized = domain.trim().toLowerCase();
-  const user = await db
-    .prepare(`SELECT email FROM "user" WHERE lower(email) LIKE ? LIMIT 1`)
-    .bind(`%@${normalized}`)
-    .first<{ email: string }>();
+  const user = await getRow<{ email: string }>(
+    db,
+    sql`SELECT email FROM "user"
+        WHERE lower(substr(email, instr(email, '@') + 1)) = ${normalized}
+        LIMIT 1`
+  );
   if (user) {
     throw new AppError(
       "DOMAIN_USED_BY_LOGIN_EMAIL",

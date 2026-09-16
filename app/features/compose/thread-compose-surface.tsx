@@ -1,48 +1,108 @@
-import { ArrowLeft, Send, X } from "lucide-react";
 import * as React from "react";
+import { createPortal } from "react-dom";
+import { PiArrowLeft, PiArrowSquareOut, PiPaperPlaneTilt, PiX } from "react-icons/pi";
 
 import { Button } from "@/components/ui/button";
 
 type ThreadComposeSurfaceProps = {
   children: React.ReactNode;
   formId: string;
+  inlineTarget: HTMLElement | null;
   sendDisabled: boolean;
   status: string;
   title: string;
   onClose: () => void;
+  onDetach?: (() => void) | undefined;
 };
 
 export function ThreadComposeSurface({
   children,
   formId,
+  inlineTarget,
   sendDisabled,
   status,
   title,
-  onClose
+  onClose,
+  onDetach
 }: ThreadComposeSurfaceProps): React.ReactElement {
   const surfaceRef = React.useRef<HTMLElement>(null);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
   const titleId = React.useId();
   const statusId = React.useId();
+  const isDesktop =
+    typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches;
 
   React.useEffect(() => {
+    if (isDesktop && (!inlineTarget || inlineTarget.hasAttribute("data-composer-parking"))) return;
     previousFocusRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const frame = window.requestAnimationFrame(() => {
+      surfaceRef.current?.scrollIntoView({ block: "start" });
       const target = surfaceRef.current?.querySelector<HTMLElement>("[data-compose-autofocus]");
-      (target ?? surfaceRef.current)?.focus();
+      (target ?? surfaceRef.current)?.focus({ preventScroll: true });
     });
     return () => {
       window.cancelAnimationFrame(frame);
       previousFocusRef.current?.focus();
     };
-  }, []);
+  }, [inlineTarget, isDesktop]);
 
-  return (
+  const desktop = (
     <section
       aria-describedby={statusId}
       aria-labelledby={titleId}
-      className="fixed inset-0 z-50 flex h-[100dvh] flex-col overflow-hidden bg-background pt-[env(safe-area-inset-top)] outline-none lg:static lg:z-auto lg:mt-6 lg:h-auto lg:rounded-lg lg:border lg:bg-card lg:pt-0 lg:shadow-sm"
+      className="mt-6 flex flex-col overflow-hidden rounded-lg border bg-card shadow-sm outline-none"
+      ref={surfaceRef}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !event.defaultPrevented) onClose();
+      }}
+    >
+      <header className="flex min-h-14 shrink-0 items-center gap-2 border-b bg-background/95 px-4">
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-sm font-medium" id={titleId}>
+            {title}
+          </h2>
+          <p className="truncate text-xs text-muted-foreground" id={statusId}>
+            {status}
+          </p>
+        </div>
+        {onDetach ? (
+          <Button
+            aria-label="Detach composer"
+            className="size-10 min-h-10 min-w-10"
+            size="icon"
+            type="button"
+            variant="ghost"
+            onClick={onDetach}
+          >
+            <PiArrowSquareOut aria-hidden="true" className="pointer-events-none" />
+          </Button>
+        ) : null}
+        <Button
+          aria-label={`Close ${title.toLowerCase()}`}
+          className="size-10 min-h-10 min-w-10"
+          size="icon"
+          type="button"
+          variant="ghost"
+          onClick={onClose}
+        >
+          <PiX aria-hidden="true" className="pointer-events-none" />
+        </Button>
+      </header>
+      <div className="min-h-0 flex-1 overflow-visible">{children}</div>
+    </section>
+  );
+
+  if (isDesktop) {
+    return inlineTarget ? createPortal(desktop, inlineTarget) : desktop;
+  }
+
+  const overlay = (
+    <section
+      aria-describedby={statusId}
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-[60] flex h-[100dvh] flex-col overflow-hidden bg-background pt-[env(safe-area-inset-top)] outline-none"
       ref={surfaceRef}
       tabIndex={-1}
       onKeyDown={(event) => {
@@ -58,7 +118,7 @@ export function ThreadComposeSurface({
           variant="ghost"
           onClick={onClose}
         >
-          <ArrowLeft />
+          <PiArrowLeft aria-hidden="true" className="pointer-events-none" />
         </Button>
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-medium" id={titleId}>
@@ -68,28 +128,47 @@ export function ThreadComposeSurface({
             {status}
           </p>
         </div>
+        {onDetach ? (
+          <Button
+            aria-label="Detach composer"
+            className="size-10 min-h-10 min-w-10"
+            size="icon"
+            type="button"
+            variant="ghost"
+            onClick={onDetach}
+          >
+            <PiArrowSquareOut aria-hidden="true" className="pointer-events-none" />
+          </Button>
+        ) : null}
         <Button
           aria-label="Send message"
-          className="size-10 lg:hidden"
+          className="size-10 min-h-10 min-w-10 lg:hidden"
           disabled={sendDisabled}
           form={formId}
           size="icon"
           type="submit"
+          variant="liquidGlass"
         >
-          <Send />
+          <PiPaperPlaneTilt aria-hidden="true" className="pointer-events-none" />
         </Button>
         <Button
           aria-label={`Close ${title.toLowerCase()}`}
-          className="hidden size-8 lg:inline-flex"
+          className="hidden size-10 min-h-10 min-w-10 lg:inline-flex"
           size="icon"
           type="button"
           variant="ghost"
           onClick={onClose}
         >
-          <X />
+          <PiX aria-hidden="true" className="pointer-events-none" />
         </Button>
       </header>
       <div className="min-h-0 flex-1 overflow-auto lg:overflow-visible">{children}</div>
     </section>
+  );
+
+  if (typeof document === "undefined") return overlay;
+  return createPortal(
+    overlay,
+    inlineTarget?.hasAttribute("data-composer-parking") ? inlineTarget : document.body
   );
 }

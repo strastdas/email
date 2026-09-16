@@ -1,62 +1,105 @@
-import { ArrowDown, ArrowUp, Download, Forward, Reply } from "lucide-react";
 import * as React from "react";
+import {
+  PiArchive,
+  PiArrowBendUpLeft,
+  PiArrowBendUpRight,
+  PiArrowCounterClockwise,
+  PiArrowDownBold,
+  PiArrowUpBold,
+  PiDotsThree,
+  PiDownloadSimple,
+  PiTrash
+} from "react-icons/pi";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/cn";
 import { formatDateTime } from "@/lib/format";
 import { MessageHtml, PlainTextMessage } from "./message-html";
-import type { MessageDetail } from "./types";
+import type { MessageDetail, MessageFolderAction } from "./types";
 
 export function ConversationMessages({
   compact = false,
   messages,
-  onCompose
+  onCompose,
+  onMessageAction
 }: {
   compact?: boolean;
   messages: MessageDetail[];
   onCompose?: (message: MessageDetail, mode: "reply" | "forward") => void;
+  onMessageAction?:
+    | ((message: MessageDetail, action: MessageFolderAction) => Promise<void> | void)
+    | undefined;
 }): React.ReactElement {
   const hiddenCount = Math.max(0, messages.length - 2);
-  const threadFingerprint = messages.map((message) => message.id).join(":");
-  const [expandedThread, setExpandedThread] = React.useState<string | null>(null);
-  const showMiddle = expandedThread === threadFingerprint;
+  const threadId = messages[0]?.threadId ?? null;
+  const [expandedThreadId, setExpandedThreadId] = React.useState<string | null>(null);
+  const previousThreadId = React.useRef(threadId);
+  const showMiddle = threadId !== null && expandedThreadId === threadId;
+  const [pendingMessageIds, setPendingMessageIds] = React.useState<Set<string>>(() => new Set());
+  const pendingMessageIdsRef = React.useRef(new Set<string>());
+  React.useEffect(() => {
+    if (previousThreadId.current === threadId) return;
+    previousThreadId.current = threadId;
+    setExpandedThreadId(null);
+  }, [threadId]);
 
   if (hiddenCount === 0) {
-    return <div className="divide-y divide-border">{messages.map(renderMessage)}</div>;
+    return (
+      <div className="divide-y divide-border">
+        {messages.map((message, index) => renderMessage(message, index === messages.length - 1))}
+      </div>
+    );
   }
 
   const first = messages[0];
   const middle = messages.slice(1, -1);
   const final = messages.at(-1);
   return (
-    <div className="divide-y divide-border">
-      {first ? renderMessage(first) : null}
-      <ThreadMessagesDivider
-        count={hiddenCount}
-        expanded={showMiddle}
-        onToggle={() =>
-          setExpandedThread((current) => (current === threadFingerprint ? null : threadFingerprint))
-        }
-      />
-      {showMiddle ? middle.map(renderMessage) : null}
-      {final ? renderMessage(final) : null}
+    <div className={showMiddle ? "divide-y divide-border" : undefined}>
+      {first ? renderMessage(first, false) : null}
+      {showMiddle ? null : (
+        <ThreadMessagesDivider
+          count={hiddenCount}
+          onExpand={() => {
+            if (threadId) setExpandedThreadId(threadId);
+          }}
+        />
+      )}
+      {showMiddle ? middle.map((message) => renderMessage(message, false)) : null}
+      {final ? renderMessage(final, true) : null}
     </div>
   );
 
-  function renderMessage(message: MessageDetail): React.ReactElement {
+  function renderMessage(message: MessageDetail, isLast: boolean): React.ReactElement {
     const timestamp = message.receivedAt ?? message.sentAt ?? message.createdAt;
+    const downloadableAttachments = message.attachments.filter(
+      (attachment) => attachment.disposition === "attachment"
+    );
     return (
       <article
-        className={cn("px-4 py-5 sm:px-6 sm:py-6", compact && "px-4 py-4 sm:px-4 sm:py-4")}
+        className={cn(
+          compact ? "px-4 py-4 sm:px-4 sm:py-4" : "px-4 pb-5 sm:px-6 sm:py-6",
+          !compact && (message === messages[0] ? "pt-2" : "pt-5")
+        )}
         data-thread-message-id={message.id}
         key={message.id}
       >
         <header className="mb-5 flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="break-words text-sm font-medium">{message.fromAddress}</div>
+            <div className="break-words text-sm font-medium text-balance [text-wrap:balance]">
+              {message.fromName ?? message.fromAddress}
+            </div>
             <div className="mt-1 break-words text-xs text-muted-foreground">
+              {message.fromName ? `${message.fromAddress} · ` : ""}
               to {message.to.join(", ")}
               {message.cc.length > 0 ? ` · cc ${message.cc.join(", ")}` : ""}
             </div>
@@ -67,7 +110,7 @@ export function ConversationMessages({
                 Sent
               </Badge>
             ) : null}
-            <time className="font-mono text-[10px] text-muted-foreground">
+            <time className="font-mono text-[10px] tabular-nums text-muted-foreground">
               {formatDateTime(timestamp)}
             </time>
           </div>
@@ -78,18 +121,18 @@ export function ConversationMessages({
           ) : (
             <PlainTextMessage message={message} />
           )}
-          {message.attachments.length > 0 ? (
+          {downloadableAttachments.length > 0 ? (
             <>
               <Separator className="my-6" />
               <div className="flex flex-col gap-2">
                 <div className="text-xs font-medium text-muted-foreground">Attachments</div>
-                {message.attachments.map((attachment) => (
+                {downloadableAttachments.map((attachment) => (
                   <a
-                    className="flex w-fit max-w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-xs hover:bg-muted"
-                    href={`/api/v1/attachments/${attachment.id}`}
+                    className="flex w-fit max-w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-xs [@media(hover:hover)]:hover:bg-muted"
+                    href={`/api/v2/attachments/${attachment.id}`}
                     key={attachment.id}
                   >
-                    <Download className="size-3.5" />
+                    <PiDownloadSimple className="size-3.5" />
                     <span className="truncate">{attachment.filename}</span>
                   </a>
                 ))}
@@ -97,34 +140,62 @@ export function ConversationMessages({
             </>
           ) : null}
         </div>
-        {onCompose ? (
+        {onCompose || onMessageAction ? (
           <footer className="mt-5 flex flex-wrap items-center gap-2">
-            <Button
-              aria-label={`Reply to message from ${message.fromAddress}`}
-              className="h-9 min-w-24 rounded-full px-4"
-              data-compose-action="reply"
-              data-compose-message-id={message.id}
-              onClick={() => onCompose(message, "reply")}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <Reply />
-              Reply
-            </Button>
-            <Button
-              aria-label={`Forward message from ${message.fromAddress}`}
-              className="h-9 min-w-24 rounded-full px-4"
-              data-compose-action="forward"
-              data-compose-message-id={message.id}
-              onClick={() => onCompose(message, "forward")}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <Forward />
-              Forward
-            </Button>
+            {onCompose ? (
+              <>
+                <Button
+                  aria-label={`Reply to message from ${message.fromAddress}`}
+                  className={cn(
+                    "rounded-full",
+                    isLast ? "h-9 min-w-24 px-4" : "h-8 min-w-0 px-3 text-xs"
+                  )}
+                  data-compose-action="reply"
+                  data-compose-message-id={message.id}
+                  onClick={() => onCompose(message, "reply")}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <PiArrowBendUpLeft />
+                  Reply
+                </Button>
+                <Button
+                  aria-label={`Forward message from ${message.fromAddress}`}
+                  className={cn(
+                    "rounded-full",
+                    isLast ? "h-9 min-w-24 px-4" : "h-8 min-w-0 px-3 text-xs"
+                  )}
+                  data-compose-action="forward"
+                  data-compose-message-id={message.id}
+                  onClick={() => onCompose(message, "forward")}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <PiArrowBendUpRight />
+                  Forward
+                </Button>
+              </>
+            ) : null}
+            {onMessageAction ? (
+              <MessageActions
+                isLast={isLast}
+                message={message}
+                pending={pendingMessageIds.has(message.id)}
+                onAction={async (action) => {
+                  if (pendingMessageIdsRef.current.has(message.id)) return;
+                  pendingMessageIdsRef.current.add(message.id);
+                  setPendingMessageIds(new Set(pendingMessageIdsRef.current));
+                  try {
+                    await onMessageAction(message, action);
+                  } finally {
+                    pendingMessageIdsRef.current.delete(message.id);
+                    setPendingMessageIds(new Set(pendingMessageIdsRef.current));
+                  }
+                }}
+              />
+            ) : null}
           </footer>
         ) : null}
       </article>
@@ -132,50 +203,113 @@ export function ConversationMessages({
   }
 }
 
+function MessageActions({
+  isLast,
+  message,
+  pending,
+  onAction
+}: {
+  isLast: boolean;
+  message: MessageDetail;
+  pending: boolean;
+  onAction: (action: MessageFolderAction) => Promise<void> | void;
+}): React.ReactElement {
+  const restoreAction = message.folder === "trash" ? "restore" : "unarchive";
+  const restoreLabel = message.folder === "trash" ? "Restore message" : "Unarchive message";
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          aria-label={`More actions for message from ${message.fromAddress}`}
+          className={cn(
+            "rounded-full",
+            isLast ? "size-9 min-h-9 min-w-9" : "size-8 min-h-8 min-w-8"
+          )}
+          data-message-actions-id={message.id}
+          disabled={pending}
+          size="icon"
+          type="button"
+          variant="outline"
+        >
+          <PiDotsThree aria-hidden="true" className="pointer-events-none" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="w-52 p-1 text-sm"
+        data-message-actions-menu={message.id}
+      >
+        <DropdownMenuGroup>
+          {message.folder === "archived" || message.folder === "trash" ? (
+            <DropdownMenuItem
+              className="min-h-10 gap-2"
+              data-message-action={restoreAction}
+              data-message-id={message.id}
+              onSelect={() => void onAction(restoreAction)}
+            >
+              <PiArrowCounterClockwise aria-hidden="true" className="size-4" />
+              {restoreLabel}
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem
+              className="min-h-10 gap-2"
+              data-message-action="archive"
+              data-message-id={message.id}
+              onSelect={() => void onAction("archive")}
+            >
+              <PiArchive aria-hidden="true" className="size-4" />
+              Archive message
+            </DropdownMenuItem>
+          )}
+          {message.folder !== "trash" ? (
+            <DropdownMenuItem
+              className="min-h-10 gap-2"
+              data-message-action="trash"
+              data-message-id={message.id}
+              onSelect={() => void onAction("trash")}
+            >
+              <PiTrash aria-hidden="true" className="size-4" />
+              Move to trash
+            </DropdownMenuItem>
+          ) : null}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function ThreadMessagesDivider({
   count,
-  expanded,
-  onToggle
+  onExpand
 }: {
   count: number;
-  expanded: boolean;
-  onToggle: () => void;
+  onExpand: () => void;
 }): React.ReactElement {
   const noun = count === 1 ? "message" : "messages";
-  const label = expanded ? `Collapse ${count} earlier ${noun}` : `Expand ${count} earlier ${noun}`;
+  const label = `Expand ${count} earlier ${noun}`;
   return (
-    <div className="flex items-center gap-3 px-4 py-3 sm:px-6" data-thread-messages-control>
+    <div className="flex items-center gap-2 px-4 py-2 sm:px-6" data-thread-messages-control>
       <Separator className="flex-1" />
-      <Button
+      <button
         aria-label={label}
-        aria-expanded={expanded}
-        className="size-11 shrink-0 rounded-full p-0 [&_svg]:size-3.5"
-        data-thread-disclosure-state={expanded ? "expanded" : "collapsed"}
-        onClick={onToggle}
-        size="icon"
+        aria-expanded="false"
+        className="group inline-flex size-11 shrink-0 items-center justify-center rounded-full text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        data-thread-disclosure-state="collapsed"
+        onClick={onExpand}
         title={label}
         type="button"
-        variant="outline"
       >
         <span
           aria-hidden="true"
-          className="grid grid-rows-[0.875rem_0.875rem_0.875rem] place-items-center"
+          className="grid size-8 grid-rows-[0.625rem_0.75rem_0.625rem] place-items-center rounded-full bg-muted transition-colors group-hover:bg-muted/80 group-hover:text-foreground"
         >
-          {expanded ? (
-            <ArrowDown data-thread-arrow="top-inward" />
-          ) : (
-            <ArrowUp data-thread-arrow="top-outward" />
-          )}
-          <span className="min-w-4 text-center font-mono text-[10px] font-semibold leading-none tabular-nums">
+          <PiArrowUpBold className="size-2.5" data-thread-arrow="top-outward" />
+          <span className="min-w-4 text-center font-mono text-[9px] font-semibold leading-none tabular-nums">
             {count}
           </span>
-          {expanded ? (
-            <ArrowUp data-thread-arrow="bottom-inward" />
-          ) : (
-            <ArrowDown data-thread-arrow="bottom-outward" />
-          )}
+          <PiArrowDownBold className="size-2.5" data-thread-arrow="bottom-outward" />
         </span>
-      </Button>
+      </button>
       <Separator className="flex-1" />
     </div>
   );

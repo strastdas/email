@@ -1,15 +1,18 @@
 import type { AppTheme } from "@/features/theme/theme";
 
 export function buildEmailHtmlDocument(input: {
+  allowDataImages?: boolean;
   allowRemoteImages: boolean;
   html: string;
   origin: string;
   theme: AppTheme;
 }): string {
   const origin = new URL(input.origin).origin;
-  const imageSources = input.allowRemoteImages ? `${origin} https: http:` : origin;
+  const imageSources = `${input.allowRemoteImages ? `${origin} https: http:` : origin}${
+    input.allowDataImages ? " data:" : ""
+  }`;
   const policy = `default-src 'none'; img-src ${imageSources}; font-src ${origin} https://cdn.strast.dev; style-src 'unsafe-inline' https://cdn.strast.dev; base-uri 'none'; form-action 'none'`;
-  return `<!doctype html><html data-theme="${input.theme}"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}"><meta name="referrer" content="no-referrer"><meta name="color-scheme" content="${input.theme}"><style>${baseStyles(input.theme)}</style></head><body>${input.html}</body></html>`;
+  return `<!doctype html><html data-theme="${input.theme}"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeAttribute(policy)}"><meta name="referrer" content="no-referrer"><meta name="color-scheme" content="${input.theme}"><link rel="stylesheet" href="https://cdn.strast.dev/fonts/clarika-pro-geometric.full.css"><style>${baseStyles(input.theme)}</style></head><body>${input.html}</body></html>`;
 }
 
 function escapeAttribute(value: string): string {
@@ -22,21 +25,31 @@ function baseStyles(theme: AppTheme): string {
       ? {
           foreground: "#f2f2f2",
           link: "#93c5fd",
-          quoteBorder: "#404040"
+          quoteBorder: "#404040",
+          scrollbar: "rgb(242 242 242 / 18%)",
+          scrollbarHover: "rgb(242 242 242 / 30%)"
         }
       : {
           foreground: "#171717",
           link: "#1d4ed8",
-          quoteBorder: "#d4d4d4"
+          quoteBorder: "#d4d4d4",
+          scrollbar: "rgb(23 23 23 / 18%)",
+          scrollbarHover: "rgb(23 23 23 / 30%)"
         };
 
   return `
-  @font-face { font-family: "lilgrotesk"; src: url("https://cdn.strast.dev/fonts/lilgrotesk/LilGrotesk-Regular.woff2") format("woff2"); font-style: normal; font-weight: 400; font-display: swap; }
   :root { color-scheme: ${theme}; }
   * { box-sizing: border-box; }
+  * { scrollbar-color: ${palette.scrollbar} transparent; scrollbar-width: thin; }
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track, *::-webkit-scrollbar-corner { background: transparent; }
+  *::-webkit-scrollbar-thumb { min-height: 24px; border: 1px solid transparent; border-radius: 999px; background: ${palette.scrollbar}; background-clip: content-box; }
+  *::-webkit-scrollbar-thumb:hover { background: ${palette.scrollbarHover}; }
+  *::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
   html { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; background: transparent; }
-  body { margin: 0; padding: 0; background: transparent; color: ${palette.foreground}; font-family: "lilgrotesk", ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.55; }
+  body { margin: 0; padding: 0; background: transparent; color: ${palette.foreground}; font: small/1.5 "clarika-pro-geometric", ui-sans-serif, system-ui, sans-serif; }
   a { color: ${palette.link}; }
-  blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid ${palette.quoteBorder}; }
+  blockquote.gmail_quote { margin: 0 0 0 0.8ex; border-left: 1px solid ${palette.quoteBorder}; padding-left: 1ex; }
+  blockquote { margin: 0 0 0 0.8ex; border-left: 1px solid ${palette.quoteBorder}; padding-left: 1ex; }
 `;
 }

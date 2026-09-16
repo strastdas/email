@@ -7,6 +7,8 @@ import { UPDATE_STARTED_EVENT } from "@/features/updates/update-progress";
 describe("PWA registration", () => {
   afterEach(() => {
     document.documentElement.removeAttribute("data-hqbase-update-ready");
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -83,5 +85,70 @@ describe("PWA registration", () => {
 
     unregister();
     window.removeEventListener(PWA_UPDATE_READY_EVENT, readyListener);
+  });
+
+  it("reloads when the waiting worker activated before the click", async () => {
+    const onUpdateReady = vi.fn();
+    const reload = vi.spyOn(window.location, "reload").mockImplementation(() => undefined);
+    const registration: {
+      addEventListener: ReturnType<typeof vi.fn>;
+      installing: null;
+      update: ReturnType<typeof vi.fn>;
+      waiting: { postMessage: ReturnType<typeof vi.fn> } | null;
+    } = {
+      addEventListener: vi.fn(),
+      installing: null,
+      update: vi.fn().mockResolvedValue(undefined),
+      waiting: { postMessage: vi.fn() }
+    };
+    vi.stubGlobal("navigator", {
+      onLine: true,
+      serviceWorker: {
+        addEventListener: vi.fn(),
+        controller: {},
+        register: vi.fn().mockResolvedValue(registration),
+        removeEventListener: vi.fn()
+      }
+    });
+
+    const unregister = registerPwa({ onUpdateReady });
+    await Promise.resolve();
+    registration.waiting = null;
+    onUpdateReady.mock.calls[0]?.[0].activate();
+
+    expect(reload).toHaveBeenCalledOnce();
+    unregister();
+  });
+
+  it("reloads when the waiting worker does not report activation", async () => {
+    vi.useFakeTimers();
+    const onUpdateReady = vi.fn();
+    const reload = vi.spyOn(window.location, "reload").mockImplementation(() => undefined);
+    const waiting = { postMessage: vi.fn() };
+    const registration = {
+      addEventListener: vi.fn(),
+      installing: null,
+      update: vi.fn().mockResolvedValue(undefined),
+      waiting
+    };
+    vi.stubGlobal("navigator", {
+      onLine: true,
+      serviceWorker: {
+        addEventListener: vi.fn(),
+        controller: {},
+        register: vi.fn().mockResolvedValue(registration),
+        removeEventListener: vi.fn()
+      }
+    });
+
+    const unregister = registerPwa({ onUpdateReady });
+    await Promise.resolve();
+    onUpdateReady.mock.calls[0]?.[0].activate();
+
+    expect(waiting.postMessage).toHaveBeenCalledWith({ type: "SKIP_WAITING" });
+    expect(reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(reload).toHaveBeenCalledOnce();
+    unregister();
   });
 });

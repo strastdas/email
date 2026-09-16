@@ -1,11 +1,19 @@
+import { sql } from "drizzle-orm";
+
 import { handleMailApiMetadata } from "./auth/mail-api";
+import { getRow } from "./db/drizzle";
 import { handleInboundEmail } from "./email/inbound";
+import { MailEvents } from "./features/events/durable-object";
+import { handleMailEventRoute } from "./features/events/route";
+import { ignoreMailEventFailure, publishMessageMailEvent } from "./features/events/service";
 import { handleMailApiDiscovery } from "./features/mail-api/discovery";
 import { handleMcpRoute } from "./features/mcp/route";
 import { notifyInboundMessage } from "./features/notifications/delivery";
 import { consumeJobs } from "./jobs/consumer";
 import type { WorkerEnv } from "./lib/env";
 import { apiRoutes } from "./routes";
+
+export { MailEvents };
 
 export default {
   async fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
@@ -14,22 +22,22 @@ export default {
     if (mailApiDiscovery) return mailApiDiscovery;
     const mailApiMetadata = handleMailApiMetadata(request, env);
     if (mailApiMetadata) return mailApiMetadata;
+    const mailEventResponse = await handleMailEventRoute(request, env);
+    if (mailEventResponse) return mailEventResponse;
     const mcpResponse = await handleMcpRoute(request, env, ctx);
     if (mcpResponse) return mcpResponse;
-    if (url.pathname.startsWith("/api/")) {
+    if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/management/")) {
       return apiRoutes.fetch(request, env, ctx);
     }
 
     const portal = request.headers.get("accept")?.includes("text/html")
-      ? await env.DB.prepare(
-          `SELECT current.is_canonical, canonical.hostname AS canonical_hostname
+      ? await getRow<{ is_canonical: number; canonical_hostname: string }>(
+          env.DB,
+          sql`SELECT current.is_canonical, canonical.hostname AS canonical_hostname
        FROM workspace_hosts current
        JOIN workspace_hosts canonical ON canonical.kind = 'portal' AND canonical.is_canonical = 1
-       WHERE current.kind = 'portal' AND current.hostname = ?`
-        )
-          .bind(url.hostname.toLowerCase())
-          .first<{ is_canonical: number; canonical_hostname: string }>()
-          .catch(() => null)
+       WHERE current.kind = 'portal' AND current.hostname = ${url.hostname.toLowerCase()}`
+        ).catch(() => null)
       : null;
     if (portal && portal.is_canonical !== 1) {
       url.hostname = portal.canonical_hostname;
@@ -45,11 +53,19 @@ export default {
     ctx: ExecutionContext
   ): Promise<void> {
     const stored = await handleInboundEmail(message, env);
+    if (!stored) return;
     if (stored.inserted) {
       ctx.waitUntil(
-        notifyInboundMessage(env, stored.message).catch(() => {
+        notifyInboundMessage(env, stored.message, stored.isUnassigned).catch(() => {
           // Push delivery is additive and never changes accepted inbound mail.
         })
+      );
+      ctx.waitUntil(
+        ignoreMailEventFailure(
+          publishMessageMailEvent(env, [
+            { isUnassigned: stored.isUnassigned, mailboxId: stored.message.mailboxId }
+          ])
+        )
       );
     }
   },

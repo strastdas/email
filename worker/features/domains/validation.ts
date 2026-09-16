@@ -36,4 +36,6 @@ export const changePortalHostnameSchema = z.object({
   workerName: z.string().trim().min(1).max(63).optional()
 });
 
-export const changeServiceHostnameSchema = changePortalHostnameSchema;
+export const forgetMailDomainSchema = z.object({
+  confirmation: domainSchema
+});

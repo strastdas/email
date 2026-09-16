@@ -13,6 +13,7 @@ type RegisterPwaOptions = {
 const UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const ACTIVE_UPDATE_INTERVAL_MS = 10_000;
 const ACTIVE_UPDATE_LIFETIME_MS = 30 * 60 * 1000;
+const ACTIVATION_FALLBACK_MS = 1_000;
 
 export function registerPwa({
   onUpdateReady,
@@ -25,11 +26,28 @@ export function registerPwa({
   let disposed = false;
   let activeUpdateInterval: number | undefined;
   let activeUpdateDeadline = 0;
+  let activationFallback: number | undefined;
+
+  const reloadPage = (): void => {
+    if (activationFallback !== undefined) window.clearTimeout(activationFallback);
+    activationFallback = undefined;
+    window.location.reload();
+  };
 
   const activate = (): void => {
-    if (!registration?.waiting) return;
+    const waiting = registration?.waiting;
+    if (!waiting) {
+      reloadPage();
+      return;
+    }
     refreshAfterActivation = true;
-    registration.waiting.postMessage({ type: "SKIP_WAITING" });
+    waiting.postMessage({ type: "SKIP_WAITING" });
+    if (activationFallback !== undefined) window.clearTimeout(activationFallback);
+    activationFallback = window.setTimeout(() => {
+      if (!refreshAfterActivation) return;
+      refreshAfterActivation = false;
+      reloadPage();
+    }, ACTIVATION_FALLBACK_MS);
   };
 
   const announceWaitingWorker = (): void => {
@@ -69,7 +87,7 @@ export function registerPwa({
   const handleControllerChange = (): void => {
     if (!refreshAfterActivation) return;
     refreshAfterActivation = false;
-    window.location.reload();
+    reloadPage();
   };
 
   const handleFocus = (): void => checkForUpdate();
@@ -104,6 +122,7 @@ export function registerPwa({
   return () => {
     disposed = true;
     window.clearInterval(interval);
+    if (activationFallback !== undefined) window.clearTimeout(activationFallback);
     stopActiveUpdateWatch();
     navigator.serviceWorker.removeEventListener("controllerchange", handleControllerChange);
     window.removeEventListener("focus", handleFocus);

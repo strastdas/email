@@ -7,24 +7,31 @@ import {
   handleDeviceTokenRequest
 } from "../auth/device-authorization";
 import { MailApiAuthError, mailApiChallenge } from "../auth/mail-api";
+import { agentManagementRoutes } from "../features/agents/routes";
 import { auditRoutes } from "../features/audit/routes";
+import { contactRoutes } from "../features/contacts/routes";
 import { domainRoutes } from "../features/domains/routes";
 import { draftRoutes } from "../features/drafts/routes";
+import { labelRoutes } from "../features/labels/routes";
 import { mailApiRoutes } from "../features/mail-api/routes";
 import { mailboxAccessRoutes } from "../features/mailbox-access/routes";
 import { mailboxRoutes } from "../features/mailboxes/routes";
 import { conversationRoutes } from "../features/messages/conversation-routes";
 import { attachmentRoutes, messageRoutes } from "../features/messages/routes";
 import { notificationRoutes } from "../features/notifications/routes";
+import { oauthConnectionRoutes } from "../features/oauth-connections/routes";
 import { operationRoutes } from "../features/operations/routes";
+import { searchRoutes } from "../features/search/routes";
 import { sendRoutes } from "../features/send/routes";
 import { sessionControlRoutes } from "../features/sessions/routes";
 import { setupRoutes } from "../features/setup/routes";
+import { signatureRoutes } from "../features/signatures/routes";
 import { updateRoutes } from "../features/updates/routes";
 import { userRoutes } from "../features/users/routes";
 import type { HonoApp } from "../lib/env";
 import { errorBody, toAppError } from "../lib/errors";
 import { jsonResponse } from "../lib/json";
+import { operationalLog } from "../observability/log";
 import { enforceRateLimit } from "../security/rate-limit";
 
 import { healthRoutes } from "./health";
@@ -45,11 +52,19 @@ apiRoutes.use("*", async (c, next) => {
 
 apiRoutes.onError((error, c) => {
   const appError = toAppError(error);
+  if (appError.status >= 500) {
+    operationalLog("error", "api_request_failed", {
+      code: appError.code,
+      requestId: c.get("correlationId") ?? "unavailable"
+    });
+  }
   const response = jsonResponse(errorBody(appError.code, appError.message), {
     status: appError.status
   });
   if (error instanceof MailApiAuthError) {
     response.headers.set("www-authenticate", mailApiChallenge(c.env, c.req.raw, error));
+  } else if (appError.code === "INVALID_AGENT_CREDENTIAL") {
+    response.headers.set("www-authenticate", 'Bearer realm="HQBase Management API"');
   }
   return response;
 });
@@ -62,20 +77,27 @@ apiRoutes.route("/api/health", healthRoutes);
 apiRoutes.route("/api/setup", setupRoutes);
 apiRoutes.route("/api/me", meRoutes);
 apiRoutes.route("/api/audit", auditRoutes);
+apiRoutes.route("/api/contacts", contactRoutes);
 apiRoutes.route("/api/domains", domainRoutes);
 apiRoutes.route("/api/drafts", draftRoutes);
+apiRoutes.route("/api/labels", labelRoutes);
 apiRoutes.route("/api/mailbox-grants", mailboxAccessRoutes);
 apiRoutes.route("/api/sessions", sessionControlRoutes);
 apiRoutes.route("/api/operations", operationRoutes);
+apiRoutes.route("/api/oauth-connections", oauthConnectionRoutes);
 apiRoutes.route("/api/mailboxes", mailboxRoutes);
 apiRoutes.route("/api/conversations", conversationRoutes);
 apiRoutes.route("/api/messages", messageRoutes);
 apiRoutes.route("/api/notifications", notificationRoutes);
+apiRoutes.route("/api/search", searchRoutes);
+apiRoutes.route("/api/signatures", signatureRoutes);
 apiRoutes.route("/api/attachments", attachmentRoutes);
 apiRoutes.route("/api/users", userRoutes);
 apiRoutes.route("/api/updates", updateRoutes);
 apiRoutes.route("/api", sendRoutes);
 apiRoutes.route("/api/v1", mailApiRoutes);
+apiRoutes.route("/api/v2", mailApiRoutes);
+apiRoutes.route("/management/v1/agents", agentManagementRoutes);
 
 apiRoutes.all("/api/auth/*", async (c) => {
   const pathname = new URL(c.req.raw.url).pathname;
@@ -92,6 +114,21 @@ apiRoutes.all("/api/auth/*", async (c) => {
       errorBody("SIGNUP_DISABLED", "Public signup is disabled. Use setup or admin user creation."),
       403
     );
+  }
+
+  // better-auth's admin plugin exposes owner-equivalent operations (set-role,
+  // set-user-password, ban-user, remove-user, impersonate-user, ...) under
+  // this prefix, gated only by the coarse "admin" ac role, which adminRole
+  // intentionally shares with ownerRole (see worker/auth/access.ts). The
+  // app-level owner-only checks (OWNER_REQUIRED, LAST_OWNER) live only in
+  // worker/features/users/routes.ts, so this raw surface must never be
+  // reachable directly: an admin-role user could otherwise call
+  // /api/auth/admin/set-role to promote themselves to owner. The app's own
+  // admin flows (create-user, set-user-password) call auth.handler()
+  // in-process via worker/auth/user-actions.ts and never traverse this HTTP
+  // route, so blocking it here does not affect them.
+  if (pathname.startsWith("/api/auth/admin/")) {
+    return c.json(errorBody("FORBIDDEN", "This endpoint is not available directly."), 403);
   }
 
   if (pathname === "/api/auth/sign-in/email" && c.req.method === "POST") {

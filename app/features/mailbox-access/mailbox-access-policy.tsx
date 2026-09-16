@@ -9,14 +9,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select";
+import { DropdownSelect } from "@/components/ui/dropdown-select";
 import {
   Table,
   TableBody,
@@ -47,12 +40,12 @@ export function MailboxAccessCell({
   return (
     <Button
       aria-label={`View access for ${mailbox.address}`}
-      className="h-auto min-h-10 max-w-full justify-start whitespace-normal px-0 py-1 text-left text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+      className="h-[30px] min-h-[30px] max-w-full justify-start whitespace-nowrap px-0 py-0.5 text-left text-xs font-normal text-muted-foreground [@media(hover:hover)]:hover:bg-transparent [@media(hover:hover)]:hover:text-foreground"
       type="button"
       variant="ghost"
       onClick={onManage}
     >
-      <span className="line-clamp-2">
+      <span className="truncate">
         {formatMailboxAccessSummary(mailbox.id, policies.grants, users, policies.loading)}
       </span>
     </Button>
@@ -83,7 +76,7 @@ export function MailboxAccessPolicyDialog({
         </DialogHeader>
         <Table containerClassName="rounded-lg border">
           <TableHeader className="bg-muted/40">
-            <TableRow className="hover:bg-transparent">
+            <TableRow className="[@media(hover:hover)]:hover:bg-transparent">
               <TableHead>User</TableHead>
               <TableHead className="w-40">Access</TableHead>
             </TableRow>
@@ -109,30 +102,24 @@ export function MailboxAccessPolicyDialog({
                     <span className="block text-xs text-muted-foreground">{user.email}</span>
                   </TableCell>
                   <TableCell>
-                    <Select
+                    <DropdownSelect
+                      ariaLabel={`${user.name} access to ${mailbox?.address ?? "mailbox"}`}
+                      className="w-32 px-2.5 text-[13px] shadow-none"
                       disabled={policies.busy === key || !mailbox}
+                      options={[
+                        { label: "No access", value: "none" },
+                        { label: "Read", value: "read" },
+                        { label: "Handle mail", value: "agent" },
+                        { label: "Manager", value: "manager" }
+                      ]}
+                      size="sm"
                       value={value}
                       onValueChange={(next) =>
                         mailbox
                           ? void policies.change(mailbox.id, user.id, next as AccessChoice)
                           : undefined
                       }
-                    >
-                      <SelectTrigger
-                        aria-label={`${user.name} access to ${mailbox?.address ?? "mailbox"}`}
-                        className="w-32 shadow-none"
-                      >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectItem value="none">No access</SelectItem>
-                          <SelectItem value="read">Read</SelectItem>
-                          <SelectItem value="agent">Agent</SelectItem>
-                          <SelectItem value="manager">Manager</SelectItem>
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
+                    />
                   </TableCell>
                 </TableRow>
               );

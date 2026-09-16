@@ -132,9 +132,13 @@ const safeStyleValue =
 const remoteCssResource = /(?:https?:)?\/\//i;
 
 export type SanitizedMessageHtml = {
+  afterQuotedHtml: string | null;
+  afterQuotedHtmlHasRemoteImages: boolean;
   hasRemoteImages: boolean;
   html: string;
+  htmlHasRemoteImages: boolean;
   quotedHtml: string | null;
+  quotedHtmlHasRemoteImages: boolean;
 };
 
 export function sanitizeMessageHtml(input: {
@@ -144,15 +148,24 @@ export function sanitizeMessageHtml(input: {
   inlineBasePath?: string;
   messageId: string;
   origin: string;
-  subject: string;
 }): SanitizedMessageHtml {
-  const parts = splitQuotedHtml(input.html, input.subject);
+  const parts = splitQuotedHtml(input.html);
   const body = sanitizeDisplayHtml({ ...input, html: parts.body });
   const quote = parts.quote ? sanitizeDisplayHtml({ ...input, html: parts.quote }) : null;
+  const afterQuote = parts.afterQuote
+    ? sanitizeDisplayHtml({ ...input, html: parts.afterQuote })
+    : null;
   return {
-    hasRemoteImages: body.hasRemoteImages || Boolean(quote?.hasRemoteImages),
+    afterQuotedHtml: afterQuote?.html || null,
+    afterQuotedHtmlHasRemoteImages: Boolean(afterQuote?.hasRemoteImages),
+    hasRemoteImages:
+      body.hasRemoteImages ||
+      Boolean(quote?.hasRemoteImages) ||
+      Boolean(afterQuote?.hasRemoteImages),
     html: body.html,
-    quotedHtml: quote?.html || null
+    htmlHasRemoteImages: body.hasRemoteImages,
+    quotedHtml: quote?.html || null,
+    quotedHtmlHasRemoteImages: Boolean(quote?.hasRemoteImages)
   };
 }
 
@@ -212,7 +225,7 @@ function sanitizeDisplayHtml(input: {
   inlineBasePath?: string;
   messageId: string;
   origin: string;
-}): Omit<SanitizedMessageHtml, "quotedHtml"> {
+}) {
   const origin = safeOrigin(input.origin);
   const contentIds = new Map(
     input.attachments.flatMap((attachment) =>
@@ -333,7 +346,6 @@ function safeLinkAttributes(attributes: sanitizeHtml.Attributes): sanitizeHtml.A
   if (!href || (!href.startsWith("#") && !isSafeLink(href))) {
     return { title: attributes.title ?? "" };
   }
-  if (href.startsWith("#")) return { href, title: attributes.title ?? "" };
   return {
     href,
     rel: "noopener noreferrer",

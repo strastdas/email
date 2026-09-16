@@ -19,6 +19,7 @@ export function createWranglerConfig(manifest) {
   const cloudflareOAuth = manifest.cloudflareOAuth ?? { mode: "official" };
   const config = {
     $schema: `${rootFromDeployment}/node_modules/wrangler/config-schema.json`,
+    ...(manifest.accountId ? { account_id: manifest.accountId } : {}),
     name: manifest.worker.name,
     main: `${rootFromDeployment}/worker/index.ts`,
     // Matches the repository Wrangler configuration: a mail workspace should be
@@ -32,10 +33,13 @@ export function createWranglerConfig(manifest) {
       not_found_handling: "single-page-application",
       run_worker_first: [
         "/api/*",
+        "/management/*",
         "/mcp",
         "/mcp/*",
         "/.well-known/*",
         "/skills/hqbase-mail/SKILL.md",
+        "/skills/hqbase-mailbox/SKILL.md",
+        "/skills/hqbase-provisioner/SKILL.md",
         "/AGENTS.md",
         "/agents.md"
       ]
@@ -47,6 +51,10 @@ export function createWranglerConfig(manifest) {
         invocation_logs: false
       }
     },
+    durable_objects: {
+      bindings: [{ name: "MAIL_EVENTS", class_name: "MailEvents" }]
+    },
+    migrations: [{ tag: "mail-events-v1", new_sqlite_classes: ["MailEvents"] }],
     secrets: {
       required: ["BETTER_AUTH_SECRET"]
     },
@@ -65,11 +73,11 @@ export function createWranglerConfig(manifest) {
       }
     ],
     queues: {
-      producers: [{ binding: "HQBASE_JOBS", queue: manifest.queue.name }],
+      producers: [{ binding: "HQBASE_JOBS", queue: manifest.queue.primary.name }],
       consumers: [
         {
-          queue: manifest.queue.name,
-          dead_letter_queue: manifest.queue.deadLetterName,
+          queue: manifest.queue.primary.name,
+          dead_letter_queue: manifest.queue.deadLetter.name,
           max_batch_size: 10,
           max_batch_timeout: 5,
           max_retries: 3
@@ -93,7 +101,11 @@ export function createWranglerConfig(manifest) {
       : {}),
     ...(manifest.authUrl ? { BETTER_AUTH_URL: manifest.authUrl } : {})
   };
-  const customDomains = [manifest.appDomain].filter(Boolean);
+  // Retired hostnames stay attached so automation, mail discovery, and the 308 portal redirect
+  // keep answering on them until the operator removes them explicitly.
+  const customDomains = [
+    ...new Set([manifest.appDomain, ...(manifest.retiredDomains ?? [])].filter(Boolean))
+  ];
   if (customDomains.length > 0) {
     config.routes = customDomains.map((pattern) => ({ pattern, custom_domain: true }));
   }

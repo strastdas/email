@@ -5,6 +5,7 @@
 @layer base {
   :root {
     color-scheme: light;
+    --star: 42 96% 50%;
     --background: 0 0% 100%;
     --foreground: 0 0% 9%;
     --card: 0 0% 99%;
@@ -23,12 +24,22 @@
     --destructive-foreground: 0 0% 98%;
     --border: 0 0% 88%;
     --input: 0 0% 82%;
-    --ring: 0 0% 35%;
+    --focus-border: 0 0% 48%;
+    --surface-rail: 240 4% 96%;
+    --surface-sidebar: 240 5% 99%;
+    --surface-toolbar: 240 5% 100%;
+    --surface-list: 240 5% 98%;
+    --surface-reader: 240 5% 100%;
+    --surface-selected: 240 5% 90%;
+    --surface-hover: 240 5% 92%;
+    --divider-subtle: 240 5% 90%;
+    --text-tertiary: 240 3% 56%;
     --radius: 0.5rem;
   }
 
   .dark {
     color-scheme: dark;
+    --star: 42 96% 58%;
     --background: 0 0% 3%;
     --foreground: 0 0% 96%;
     --card: 0 0% 5%;
@@ -47,12 +58,31 @@
     --destructive-foreground: 0 0% 98%;
     --border: 0 0% 15%;
     --input: 0 0% 18%;
-    --ring: 0 0% 55%;
+    --focus-border: 0 0% 38%;
+    --surface-rail: 240 5% 4%;
+    --surface-sidebar: 240 5% 7%;
+    --surface-toolbar: 240 5% 8%;
+    --surface-list: 240 5% 6%;
+    --surface-reader: 240 5% 4%;
+    --surface-selected: 240 4% 16%;
+    --surface-hover: 240 4% 13%;
+    --divider-subtle: 240 4% 15%;
+    --text-tertiary: 240 3% 50%;
   }
 
   html {
     background-color: hsl(var(--background));
     overscroll-behavior: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html.disable-transitions *,
+  html.disable-transitions *::before,
+  html.disable-transitions *::after {
+    transition-duration: 0s;
+    animation-duration: 0s;
+    animation-delay: 0s;
   }
 
   * {
@@ -60,31 +90,206 @@
   }
 
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-background text-foreground;
     min-width: 320px;
     min-height: 100dvh;
     overscroll-behavior: none;
+    font-family: "clarika-pro-geometric", ui-sans-serif, system-ui, sans-serif;
     font-feature-settings:
       "rlig" 1,
-      "calt" 1;
+      "calt" 1,
+      "ss01" 1,
+      "ss03" 1;
+    font-optical-sizing: auto;
+    text-rendering: optimizeLegibility;
+    text-underline-position: from-font;
+    text-decoration-skip-ink: auto;
+  }
+
+  img {
+    outline: 1px solid rgb(0 0 0 / 8%);
+    outline-offset: -1px;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  a,
+  button {
+    text-underline-position: from-font;
+    text-decoration-skip-ink: auto;
   }
 
   #root {
     min-height: 100dvh;
   }
-}
 
-@media (hover: hover) and (pointer: fine) and (max-width: 1023px),
-  (hover: hover) and (pointer: fine) and (max-height: 599px) {
-  .desktop-window-guard {
-    display: flex;
+  html[data-hqbase-shell="fixed"],
+  html[data-hqbase-shell="fixed"] body,
+  html[data-hqbase-shell="fixed"] #root {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  @media (max-width: 1023px) {
+    html[data-hqbase-shell="fixed"],
+    html[data-hqbase-shell="fixed"] body,
+    html[data-hqbase-shell="fixed"] #root {
+      background-color: hsl(var(--surface-list));
+    }
+  }
+
+  [id] {
+    scroll-margin-top: 2rem;
+  }
+
+  .btn-liquid-glass {
+    background-color: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(12px) saturate(1.4);
+    -webkit-backdrop-filter: blur(12px) saturate(1.4);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow:
+      0 1px 3px rgba(0, 0, 0, 0.05),
+      0 1px 0 rgba(255, 255, 255, 0.85) inset;
+    color: #1c1917;
+  }
+
+  .dark .btn-liquid-glass {
+    background-color: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(12px) saturate(1.2);
+    -webkit-backdrop-filter: blur(12px) saturate(1.2);
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+    color: hsl(var(--foreground));
+  }
+
+  @media (hover: hover) {
+    .btn-liquid-glass:hover {
+      background-color: rgba(255, 255, 255, 0.84);
+      border-color: rgba(0, 0, 0, 0.1);
+      box-shadow:
+        0 2px 8px rgba(0, 0, 0, 0.06),
+        0 1px 0 rgba(255, 255, 255, 0.95) inset;
+    }
+
+    .dark .btn-liquid-glass:hover {
+      background-color: rgba(255, 255, 255, 0.12);
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.1) inset;
+    }
   }
 }
 
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.prose-measure {
+  max-width: 65ch;
+}
+
 @media (max-width: 767px) {
+  [data-slot="dialog-content"] {
+    --dialog-safe-top: max(1rem, calc(env(safe-area-inset-top) + 0.75rem));
+    --dialog-safe-bottom: max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem));
+    top: var(--dialog-safe-top);
+    max-height: calc(100dvh - var(--dialog-safe-top) - var(--dialog-safe-bottom));
+    transform: translateX(-50%);
+    overflow-y: auto;
+  }
+
   input:not([type="checkbox"]):not([type="radio"]),
   textarea[class],
   [contenteditable="true"][class] {
     font-size: 16px;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:where(
+  a[href],
+  button,
+  summary,
+  [contenteditable="true"],
+  [role="button"],
+  [role="menuitem"],
+  [role="option"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  --tw-ring-offset-shadow: 0 0 #0000 !important;
+  --tw-ring-shadow: 0 0 #0000 !important;
+  outline: 1px solid hsl(var(--focus-border)) !important;
+  outline-offset: 1px !important;
+}
+
+:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
+  border-color: hsl(var(--focus-border)) !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+:where([contenteditable="true"][data-compose-autofocus]):focus-visible {
+  outline: none !important;
+}
+
+[data-slot="input-group"]:focus-within,
+[data-slot="dropdown-select"]:focus-visible {
+  border-color: hsl(var(--focus-border)) !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+:where(input, textarea, select)[aria-invalid="true"]:focus-visible,
+[data-slot="input-group"][data-invalid="true"]:focus-within {
+  border-color: hsl(var(--destructive)) !important;
+}
+
+* {
+  scrollbar-color: hsl(var(--foreground) / 0.18) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 24px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background-color: hsl(var(--foreground) / 0.18);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--foreground) / 0.3);
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }

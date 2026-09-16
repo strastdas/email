@@ -2,6 +2,7 @@ import type * as React from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -36,20 +37,26 @@ export function MailboxSelectionBar({
 
 export function MailboxTable({
   canManage,
+  catchAllDomainByMailbox = {},
   mailboxes,
+  pendingMailboxId,
   policies,
   selectedIds,
   users,
   onOpenDetails,
-  onSelectionChange
+  onSelectionChange,
+  onToggle
 }: {
   canManage: boolean;
+  catchAllDomainByMailbox?: Record<string, string>;
   mailboxes: Mailbox[];
+  pendingMailboxId: string | null;
   policies: MailboxAccessPolicies;
   selectedIds: string[];
   users: WorkspaceUser[];
   onOpenDetails: (mailbox: Mailbox) => void;
   onSelectionChange: (selectedIds: string[]) => void;
+  onToggle: (mailbox: Mailbox, isActive: boolean) => void;
 }): React.ReactElement {
   const selected = new Set(selectedIds);
   const visibleIds = mailboxes.map((mailbox) => mailbox.id);
@@ -76,7 +83,7 @@ export function MailboxTable({
   return (
     <Table containerClassName="rounded-lg border">
       <TableHeader className="bg-muted/40">
-        <TableRow className="hover:bg-transparent">
+        <TableRow className="[@media(hover:hover)]:hover:bg-transparent">
           {canManage ? (
             <TableHead className="w-10">
               <Checkbox
@@ -88,7 +95,7 @@ export function MailboxTable({
           ) : null}
           <TableHead>Address</TableHead>
           <TableHead className="hidden sm:table-cell">Name</TableHead>
-          <TableHead className="hidden w-28 md:table-cell">Status</TableHead>
+          <TableHead className="w-20">Status</TableHead>
           <TableHead className="w-32 sm:w-48">Access</TableHead>
         </TableRow>
       </TableHeader>
@@ -122,28 +129,42 @@ export function MailboxTable({
                 </TableCell>
               ) : null}
               <TableCell className="max-w-52">
-                <button
-                  className="block max-w-full truncate rounded-sm text-left font-medium underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  type="button"
-                  onClick={() => onOpenDetails(mailbox)}
-                >
-                  {mailbox.address}
-                </button>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <button
+                    className="min-w-0 flex-1 truncate rounded-sm text-left font-medium underline-offset-4 [@media(hover:hover)]:hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    type="button"
+                    onClick={() => onOpenDetails(mailbox)}
+                  >
+                    {mailbox.address}
+                  </button>
+                  {catchAllDomainByMailbox[mailbox.id] ? (
+                    <Badge
+                      className="max-w-36 shrink-0 truncate"
+                      title={`Catch-all for ${catchAllDomainByMailbox[mailbox.id]}`}
+                      variant="outline"
+                    >
+                      Catch-all for {catchAllDomainByMailbox[mailbox.id]}
+                    </Badge>
+                  ) : null}
+                </div>
                 <span className="mt-0.5 block truncate text-xs text-muted-foreground sm:hidden">
                   {mailbox.displayName}
                 </span>
-                <Badge
-                  className="mt-1 md:hidden"
-                  variant={mailbox.isActive ? "secondary" : "outline"}
-                >
-                  {mailbox.isActive ? "Active" : "Disabled"}
-                </Badge>
               </TableCell>
               <TableCell className="hidden sm:table-cell">{mailbox.displayName}</TableCell>
-              <TableCell className="hidden md:table-cell">
-                <Badge variant={mailbox.isActive ? "secondary" : "outline"}>
-                  {mailbox.isActive ? "Active" : "Disabled"}
-                </Badge>
+              <TableCell onClick={canManage ? (event) => event.stopPropagation() : undefined}>
+                {canManage ? (
+                  <Switch
+                    aria-label={`${mailbox.address} status`}
+                    checked={mailbox.isActive}
+                    disabled={pendingMailboxId !== null}
+                    onCheckedChange={(isActive) => onToggle(mailbox, isActive)}
+                  />
+                ) : (
+                  <Badge variant={mailbox.isActive ? "secondary" : "outline"}>
+                    {mailbox.isActive ? "Active" : "Disabled"}
+                  </Badge>
+                )}
               </TableCell>
               <TableCell>
                 {canManage ? (
@@ -155,7 +176,7 @@ export function MailboxTable({
                   />
                 ) : (
                   <button
-                    className="min-h-10 rounded-sm text-left text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="min-h-8 rounded-sm text-left text-xs text-muted-foreground underline-offset-4 [@media(hover:hover)]:hover:text-foreground [@media(hover:hover)]:hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     type="button"
                     onClick={() => onOpenDetails(mailbox)}
                   >

@@ -15,15 +15,15 @@ describe("local database seed fixture", () => {
     await applyStatements(
       buildSeedSql(await hashPassword(password), new Date("2026-08-14T18:00:00.000Z"))
     );
-  });
+  }, 60_000);
 
   it("creates a complete workspace with representative records", async () => {
     const setup = await SELF.fetch(`${origin}/api/setup/status`);
     await expect(setup.json()).resolves.toMatchObject({
       isComplete: true,
       primaryDomain: "example.test",
-      userCount: 1,
-      mailboxCount: 2
+      userCount: 4,
+      mailboxCount: 8
     });
 
     const counts = await env.DB.prepare(
@@ -31,31 +31,76 @@ describe("local database seed fixture", () => {
           (SELECT COUNT(*) FROM threads) AS threads,
           (SELECT COUNT(*) FROM messages) AS messages,
           (SELECT COUNT(*) FROM drafts) AS drafts,
-          (SELECT COUNT(*) FROM mailbox_addresses) AS addresses,
+          (SELECT COUNT(*) FROM labels) AS labels,
+          (SELECT COUNT(*) FROM draft_labels) AS draft_labels,
+          (SELECT COUNT(*) FROM messages message
+           WHERE NOT EXISTS (
+             SELECT 1 FROM message_labels assignment WHERE assignment.message_id = message.id
+           )) AS unlabeled_messages,
+          (SELECT COUNT(*) FROM drafts draft
+           WHERE NOT EXISTS (
+             SELECT 1 FROM draft_labels assignment WHERE assignment.draft_id = draft.id
+           )) AS unlabeled_drafts,
+          (SELECT COUNT(*) FROM mailboxes) AS mailboxes,
+          (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'mailbox_addresses') AS alias_tables,
+          (SELECT COUNT(*) FROM principals) AS principals,
           (SELECT value_json FROM app_settings WHERE key = 'local_seed_version') AS seed_version`
     ).first<{
       threads: number;
       messages: number;
       drafts: number;
-      addresses: number;
+      labels: number;
+      draft_labels: number;
+      unlabeled_messages: number;
+      unlabeled_drafts: number;
+      mailboxes: number;
+      alias_tables: number;
+      principals: number;
       seed_version: string;
     }>();
     expect(counts).toEqual({
-      threads: 3,
-      messages: 4,
-      drafts: 1,
-      addresses: 2,
-      seed_version: '"local-demo-v1"'
+      threads: 116,
+      messages: 123,
+      drafts: 4,
+      labels: 11,
+      draft_labels: 5,
+      unlabeled_messages: 0,
+      unlabeled_drafts: 0,
+      mailboxes: 8,
+      alias_tables: 0,
+      principals: 4,
+      seed_version: '"local-demo-v4"'
     });
+
+    const promotedMailboxes = await env.DB.prepare(
+      `SELECT id, address, mail_domain_id
+       FROM mailboxes
+       WHERE id IN ('mbx_migrated_addr_local_support_alias',
+                    'mbx_migrated_addr_local_ops_catchall')
+       ORDER BY id`
+    ).all<{ id: string; address: string; mail_domain_id: string }>();
+    expect(promotedMailboxes.results).toEqual([
+      {
+        id: "mbx_migrated_addr_local_ops_catchall",
+        address: "catchall@ops.example.test",
+        mail_domain_id: "dom_local_ops"
+      },
+      {
+        id: "mbx_migrated_addr_local_support_alias",
+        address: "help@example.test",
+        mail_domain_id: "dom_local_demo"
+      }
+    ]);
 
     const deliveries = await env.DB.prepare(
       `SELECT COUNT(*) AS count
        FROM messages
-       WHERE direction = 'inbound' AND delivered_to_address_id IS NOT NULL`
+       WHERE direction = 'inbound' AND delivered_to_address IS NOT NULL`
     ).first<{ count: number }>();
-    expect(deliveries?.count).toBe(3);
+    expect(deliveries?.count).toBe(118);
   });
 
+  // Rebuilding the full fixture needs the same CI budget as its initial setup.
   it("is repeatable without duplicating fixture records", async () => {
     await applyStatements(
       buildSeedSql(await hashPassword(password), new Date("2026-08-14T19:00:00.000Z"))
@@ -66,8 +111,8 @@ describe("local database seed fixture", () => {
           (SELECT COUNT(*) FROM messages WHERE id LIKE 'msg_local_%') AS messages,
           (SELECT COUNT(*) FROM drafts WHERE id LIKE 'drf_local_%') AS drafts`
     ).first<{ users: number; messages: number; drafts: number }>();
-    expect(counts).toEqual({ users: 1, messages: 4, drafts: 1 });
-  });
+    expect(counts).toEqual({ users: 1, messages: 123, drafts: 4 });
+  }, 60_000);
 
   it("creates credentials that Better Auth can use for a normal session", async () => {
     const response = await SELF.fetch(`${origin}/api/auth/sign-in/email`, {

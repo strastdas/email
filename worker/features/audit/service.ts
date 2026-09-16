@@ -2,7 +2,7 @@ import { newId, nowIso } from "../../db/client";
 
 export type AuditInput = {
   correlationId: string;
-  actorType: "user" | "system" | "operator";
+  actorType: "user" | "agent" | "system" | "operator";
   actorId?: string | null;
   action: string;
   resourceType: string;
@@ -27,12 +27,20 @@ const forbiddenMetadata = new Set([
 ]);
 
 export async function recordAudit(db: D1Database, input: AuditInput): Promise<void> {
+  await auditStatement(db, input).run();
+}
+
+export function auditStatement(
+  db: D1Database,
+  input: AuditInput,
+  occurredAt = nowIso()
+): D1PreparedStatement {
   for (const key of Object.keys(input.metadata ?? {})) {
     if (forbiddenMetadata.has(key.toLowerCase())) {
       throw new Error(`Sensitive audit metadata rejected: ${key}`);
     }
   }
-  await db
+  return db
     .prepare(
       `INSERT INTO audit_events
        (id, occurred_at, correlation_id, actor_type, actor_id, action, resource_type,
@@ -41,7 +49,7 @@ export async function recordAudit(db: D1Database, input: AuditInput): Promise<vo
     )
     .bind(
       newId("aud"),
-      nowIso(),
+      occurredAt,
       input.correlationId,
       input.actorType,
       input.actorId ?? null,
@@ -50,6 +58,5 @@ export async function recordAudit(db: D1Database, input: AuditInput): Promise<vo
       input.resourceId ?? null,
       input.outcome,
       JSON.stringify(input.metadata ?? {})
-    )
-    .run();
+    );
 }

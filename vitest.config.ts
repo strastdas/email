@@ -1,29 +1,36 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("development")
+  },
   resolve: {
     alias: {
-      "@": new URL("./app", import.meta.url).pathname,
-      "@worker": new URL("./worker", import.meta.url).pathname
+      "@": fileURLToPath(new URL("./app", import.meta.url)),
+      "@worker": fileURLToPath(new URL("./worker", import.meta.url)),
+      "cloudflare:workers": fileURLToPath(
+        new URL("./test/unit/cloudflare-workers.ts", import.meta.url)
+      )
     }
   },
   test: {
+    environmentOptions: {
+      happyDOM: {
+        settings: {
+          // Browser checks cover CDN fonts; unit tests must not fetch external stylesheets.
+          disableCSSFileLoading: true,
+          handleDisabledFileLoadingAsSuccess: true
+        }
+      }
+    },
     include: ["test/unit/**/*.test.{ts,tsx,mjs}", "test/migrations/**/*.test.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],
       reportsDirectory: "coverage",
       include: ["app/**/*.{ts,tsx}", "worker/**/*.ts"],
-      exclude: [
-        "app/components/ui/**",
-        "app/main.tsx",
-        "worker/index.ts",
-        "worker/features/domains/queries.ts",
-        "worker/features/domains/routes.ts",
-        "worker/features/drafts/queries.ts",
-        "worker/features/drafts/routes.ts",
-        "worker/features/setup/cloudflare.ts"
-      ],
+      exclude: ["app/components/ui/**", "app/features/ui-lab/**", "app/main.tsx"],
       thresholds: {
         branches: 30,
         functions: 30,

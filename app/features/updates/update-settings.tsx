@@ -1,31 +1,58 @@
-import { ArrowRight, RefreshCw } from "lucide-react";
 import * as React from "react";
+import { PiArrowRight, PiArrowsClockwise } from "react-icons/pi";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
 import { CloudflareAuthorizationDialog } from "@/features/settings/cloudflare-authorization-dialog";
 import { SettingsSection } from "@/features/settings/settings-section";
-import { applyUpdate, getUpdateStatus } from "./api";
+import { applyUpdate, getUpdateChannel, getUpdateStatus, setUpdateChannel } from "./api";
 import type { UpdateStatus } from "./types";
-import type { UpdateProgress } from "./update-progress";
+import type { UpdateActionKind, UpdateProgress } from "./update-progress";
+
+const reviewedActionKindKey = "hqb_update_action_kind";
+const reviewedVersionKey = "hqb_update_expected_version";
 
 export function UpdateSettings({
+  canChangeChannel = false,
   initialStatus,
   progress,
   onStatusChange,
   onUpdateStarted
 }: {
+  canChangeChannel?: boolean;
   initialStatus: UpdateStatus | null;
   progress: UpdateProgress | null;
   onStatusChange: (status: UpdateStatus) => void;
-  onUpdateStarted: (buildId: string) => void;
+  onUpdateStarted: (buildId: string, kind: UpdateActionKind) => void;
 }): React.ReactElement {
   const [status, setStatus] = React.useState(initialStatus);
+  const [channel, setChannel] = React.useState<UpdateStatus["channel"] | null>(null);
   const [checkError, setCheckError] = React.useState<string | null>(null);
   const [applyError, setApplyError] = React.useState<string | null>(null);
-  const [pendingAction, setPendingAction] = React.useState<"check" | "apply" | null>(null);
+  const [pendingAction, setPendingAction] = React.useState<"check" | "apply" | "channel" | null>(
+    null
+  );
   const [authorizationOpen, setAuthorizationOpen] = React.useState(false);
   const resumedRef = React.useRef(false);
+
+  React.useEffect(() => {
+    let active = true;
+    void getUpdateChannel()
+      .then((result) => {
+        if (active) setChannel(result.channel);
+      })
+      .catch((error: unknown) => {
+        if (active)
+          setCheckError(
+            error instanceof Error ? error.message : "The update channel could not be read."
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     setStatus(initialStatus);
@@ -48,14 +75,24 @@ export function UpdateSettings({
     url.searchParams.delete("settings");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 
+    const expectedVersion = window.sessionStorage.getItem(reviewedVersionKey);
+    const reviewedActionKind = window.sessionStorage.getItem(reviewedActionKindKey);
+    window.sessionStorage.removeItem(reviewedVersionKey);
+    window.sessionStorage.removeItem(reviewedActionKindKey);
+
     if (oauthResult !== "connected") {
       setApplyError(oauthErrorMessage(oauthResult));
       return;
     }
+    if (!expectedVersion) {
+      setApplyError("The reviewed release is no longer available. Check for updates again.");
+      return;
+    }
 
+    const actionKind: UpdateActionKind = reviewedActionKind === "repair" ? "repair" : "update";
     setPendingAction("apply");
-    void applyUpdate()
-      .then((result) => onUpdateStarted(result.buildId))
+    void applyUpdate(expectedVersion)
+      .then((result) => onUpdateStarted(result.buildId, actionKind))
       .catch((nextError: unknown) => {
         setApplyError(nextError instanceof Error ? nextError.message : "Update could not start.");
       })
@@ -75,10 +112,65 @@ export function UpdateSettings({
       setPendingAction(null);
     }
   }
+  async function changeChannel(nightly: boolean): Promise<void> {
+    setPendingAction("channel");
+    setCheckError(null);
+    try {
+      const { channel } = await setUpdateChannel(nightly ? "nightly" : "stable");
+      setChannel(channel);
+      window.sessionStorage.removeItem(reviewedVersionKey);
+      window.sessionStorage.removeItem(reviewedActionKindKey);
+      if (status) {
+        const changedStatus = { ...status, channel, available: false, waitingForStable: false };
+        setStatus(changedStatus);
+        onStatusChange(changedStatus);
+      }
+      const nextStatus = await getUpdateStatus();
+      setStatus(nextStatus);
+      onStatusChange(nextStatus);
+    } catch (error) {
+      setCheckError(
+        error instanceof Error ? error.message : "The update channel could not be changed."
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  }
   const isPending = pendingAction !== null;
+  const repairOnly =
+    status?.repairRequired === true && status.release.version === status.installedVersion;
+  const repairInProgress = progress?.kind === "repair";
 
   return (
-    <SettingsSection description="Signed stable releases" title="Updates">
+    <SettingsSection description="Signed Stable and Nightly releases" title="Updates">
+      <FieldGroup>
+        <Field>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="nightly-updates"
+              checked={channel === "nightly"}
+              disabled={!canChangeChannel || isPending || Boolean(progress) || channel === null}
+              onCheckedChange={(checked) => void changeChannel(checked === true)}
+              aria-describedby="nightly-updates-description"
+            />
+            <FieldLabel htmlFor="nightly-updates">Receive Nightly updates</FieldLabel>
+          </div>
+          <FieldDescription id="nightly-updates-description">
+            Nightly releases are still being tested and can contain faults. Each update needs your
+            approval. Turn this off to receive Stable updates when they catch up with your installed
+            version. Only an owner can change this setting.
+          </FieldDescription>
+        </Field>
+      </FieldGroup>
+      {status?.waitingForStable ? (
+        <Alert>
+          <AlertTitle>Waiting for Stable</AlertTitle>
+          <AlertDescription>
+            You will keep version {status.installedVersion} until a compatible Stable release
+            catches up. Your installation and mail have not changed.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {checkError ? (
         <Alert variant="destructive">
           <AlertTitle>Update check unavailable</AlertTitle>
@@ -87,7 +179,7 @@ export function UpdateSettings({
       ) : null}
       {applyError ? (
         <Alert variant="destructive">
-          <AlertTitle>Update authorization unavailable</AlertTitle>
+          <AlertTitle>Update could not start</AlertTitle>
           <AlertDescription>{applyError}</AlertDescription>
         </Alert>
       ) : null}
@@ -102,11 +194,17 @@ export function UpdateSettings({
               <Spinner aria-hidden="true" className="size-4 text-foreground" role="presentation" />
             </div>
             <div className="min-w-0">
-              <h3 className="text-sm font-medium">Update in progress</h3>
+              <h3 className="text-sm font-medium">
+                {repairInProgress ? "Installation repair in progress" : "Update in progress"}
+              </h3>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                {status?.release.version
-                  ? `HQBase ${status.release.version} is being deployed. `
-                  : "The new version is being deployed. "}
+                {repairInProgress
+                  ? status?.release.version
+                    ? `HQBase ${status.release.version} is completing its signed installation. `
+                    : "HQBase is completing its signed installation. "
+                  : status?.release.version
+                    ? `HQBase ${status.release.version} is being deployed. `
+                    : "The new version is being deployed. "}
                 You can keep working while Cloudflare finishes the build.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
@@ -125,8 +223,20 @@ export function UpdateSettings({
       >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
           <Version label="Current" value={status?.installedVersion ?? "Unknown"} />
-          <ArrowRight aria-hidden="true" className="size-3.5 text-muted-foreground/70" />
-          <Version label="Available" value={status?.release.version ?? "Not checked"} />
+          <PiArrowRight
+            aria-hidden="true"
+            className="pointer-events-none size-3.5 text-muted-foreground/70"
+          />
+          <Version
+            label={repairOnly ? "Installation" : "Available"}
+            value={
+              repairOnly
+                ? "Repair required"
+                : status?.waitingForStable
+                  ? "Waiting for Stable"
+                  : (status?.release.version ?? "Not checked")
+            }
+          />
         </div>
         <Button
           className="self-start sm:self-auto"
@@ -143,7 +253,7 @@ export function UpdateSettings({
             </>
           ) : (
             <>
-              <RefreshCw aria-hidden="true" />
+              <PiArrowsClockwise aria-hidden="true" className="pointer-events-none" />
               Check updates
             </>
           )}
@@ -151,17 +261,57 @@ export function UpdateSettings({
       </div>
       {status?.available && !progress ? (
         <div className="flex flex-col gap-4 pt-1">
+          {repairOnly ? (
+            <Alert>
+              <AlertTitle>Finish installation repair</AlertTitle>
+              <AlertDescription>
+                This installation runs HQBase {status.release.version}, but its older build
+                bootstrap did not finish the signed database migration phase. HQBase will replace
+                that bootstrap and complete the same release from a fresh recovery checkpoint. It
+                will not change your source repository.
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <div className="rounded-xl border border-border/80 bg-muted/25 p-4">
+              <h3 className="text-sm font-medium">What’s changing</h3>
+              {status.release.notes.length > 0 ? (
+                <ul className="mt-2 space-y-2 pl-4 text-xs leading-5 text-muted-foreground">
+                  {status.release.notes.map((note) => (
+                    <li className="list-disc pl-1" key={note}>
+                      {note}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                  This older release record does not include an embedded changelog.
+                </p>
+              )}
+              <a
+                className="mt-3 inline-flex text-xs font-medium text-foreground underline-offset-4 hover:underline"
+                href={status.release.notesUrl}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Read complete release notes
+              </a>
+            </div>
+          )}
           <div>
-            <h3 className="text-sm font-medium">Apply update</h3>
+            <h3 className="text-sm font-medium">
+              {repairOnly ? "Complete repair" : "Apply update"}
+            </h3>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
-              HQBase verifies the artifact, records the Worker version and D1 bookmark, migrates,
-              deploys, and verifies before reporting success.
+              HQBase verifies the signed artifact, records the Worker version and a new D1 bookmark,
+              completes the migrations, and verifies the result before reporting success.
             </p>
           </div>
           <div className="flex flex-col gap-4">
             {!status.compatible ? (
               <Alert variant="destructive">
-                <AlertTitle>Direct update unavailable</AlertTitle>
+                <AlertTitle>
+                  {repairOnly ? "Repair unavailable" : "Direct update unavailable"}
+                </AlertTitle>
                 <AlertDescription>
                   This release cannot update directly from the installed version.
                 </AlertDescription>
@@ -173,7 +323,7 @@ export function UpdateSettings({
               </Button>
             ) : !status.compatible ? (
               <Button className="self-start" disabled type="button">
-                Install update
+                {repairOnly ? "Finish repair" : "Install update"}
               </Button>
             ) : (
               <Button
@@ -181,7 +331,7 @@ export function UpdateSettings({
                 onClick={() => setAuthorizationOpen(true)}
                 type="button"
               >
-                Install update
+                {repairOnly ? "Finish repair" : "Install update"}
               </Button>
             )}
           </div>
@@ -189,8 +339,18 @@ export function UpdateSettings({
       ) : null}
       <CloudflareAuthorizationDialog
         authorizeHref="/api/updates/cloudflare/oauth/start"
-        description="To install this update, HQBase needs temporary access to your Cloudflare account. You’ll return to Updates automatically, and HQBase will start the update."
+        description={
+          repairOnly
+            ? "To finish this installation repair, HQBase needs temporary access to your Cloudflare account. You’ll return to Updates automatically, and HQBase will start the signed repair."
+            : "To install this update, HQBase needs temporary access to your Cloudflare account. You’ll return to Updates automatically, and HQBase will start the update."
+        }
         open={authorizationOpen}
+        onAuthorize={() => {
+          if (status?.release.version) {
+            window.sessionStorage.setItem(reviewedVersionKey, status.release.version);
+            window.sessionStorage.setItem(reviewedActionKindKey, repairOnly ? "repair" : "update");
+          }
+        }}
         onOpenChange={setAuthorizationOpen}
       />
     </SettingsSection>

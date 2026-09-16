@@ -1,5 +1,5 @@
-import { Globe2, Inbox, UserRound } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { PiGlobe, PiTray, PiUserCircle } from "react-icons/pi";
 import { describe, expect, it } from "vitest";
 
 import { AccessStep } from "@/features/setup/setup-access-screen";
@@ -60,9 +60,9 @@ describe("setup UI", () => {
           activePhase={3}
           activeStep={3}
           steps={[
-            { icon: Globe2, title: "Domain" },
-            { icon: UserRound, title: "Owner account" },
-            { icon: Inbox, title: "Mailboxes" }
+            { icon: PiGlobe, title: "Domain" },
+            { icon: PiUserCircle, title: "Owner account" },
+            { icon: PiTray, title: "Mailboxes" }
           ]}
         >
           <p>Complete setup</p>
@@ -117,7 +117,18 @@ describe("setup UI", () => {
     ];
     const html = renderToStaticMarkup(
       <MailboxStep
+        catchAllByDomain={{
+          "northstar.example": {
+            mailboxAddress: "support@northstar.example",
+            policy: "mailbox"
+          },
+          "fieldnotes.example": {
+            mailboxAddress: "support@fieldnotes.example",
+            policy: "mailbox"
+          }
+        }}
         defaultFromMailboxAddress="privacy@northstar.example"
+        domains={["northstar.example", "fieldnotes.example"]}
         errors={{ rows: mailboxes.map(() => ({})) }}
         isPending={false}
         mailboxes={mailboxes}
@@ -126,6 +137,8 @@ describe("setup UI", () => {
         onComplete={() => undefined}
         onRemove={() => undefined}
         onSetDefaultFromMailboxAddress={() => undefined}
+        onSetCatchAllMailbox={() => undefined}
+        onSetCatchAllPolicy={() => undefined}
         onUpdate={() => undefined}
         submitError={null}
       />
@@ -134,9 +147,17 @@ describe("setup UI", () => {
     expect(html).toContain('aria-label="Mailboxes"');
     expect(html).toContain("<table");
     expect(html).toContain("support@northstar.example");
-    expect(html).toContain("privacy@fieldnotes.example");
+    expect(html).toContain('value="privacy"');
+    expect(html).toContain("@fieldnotes.example");
+    expect(html).toContain("h-[30px]");
     expect(html).toContain("Add mailbox");
+    expect(html).toContain('aria-label="Actions for mailbox 1"');
+    expect(html).not.toContain('aria-label="Remove mailbox 1"');
     expect(html).toContain("Default From mailbox");
+    expect(html).toContain("Mail to unknown addresses");
+    expect(html).toContain("Deliver to a mailbox");
+    expect(html).toContain('class="min-w-0 space-y-1.5"');
+    expect(html).toContain('aria-label="Catch-all mailbox"');
     expect(html).toContain("Replies use the mailbox that received");
     expect(html).not.toContain("Add shared addresses");
     expect(html).not.toContain(">Review<");

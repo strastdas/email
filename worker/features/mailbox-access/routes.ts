@@ -1,13 +1,16 @@
+import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
 import { mailboxAccessLevels } from "../../auth/mailbox-access";
 import { requireAuthContext, requireRole } from "../../auth/session";
+import { getRow } from "../../db/drizzle";
 import type { HonoApp } from "../../lib/env";
 import { AppError } from "../../lib/errors";
 import { readJson } from "../../lib/json";
 import { parseWith } from "../../lib/validation";
 import { recordAudit } from "../audit/service";
+import { ignoreMailEventFailure, publishUserMailEvent } from "../events/service";
 import { listMailboxGrants, revokeMailboxGrant, setMailboxGrant } from "./queries";
 
 const grantSchema = z.object({
@@ -28,9 +31,10 @@ mailboxAccessRoutes.put("/", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
   requireRole(auth, ["owner", "admin"]);
   const input = parseWith(grantSchema, await readJson(c.req.raw));
-  const target = await c.env.DB.prepare('SELECT role FROM "user" WHERE id = ?')
-    .bind(input.userId)
-    .first<{ role: string | null }>();
+  const target = await getRow<{ role: string | null }>(
+    c.env.DB,
+    sql`SELECT role FROM "user" WHERE id = ${input.userId}`
+  );
   if (!target) throw new AppError("USER_NOT_FOUND", "User not found.", 404);
   if (target.role === "owner") {
     throw new AppError("OWNER_GRANT_IMPLICIT", "Owners already have implicit manager access.", 400);
@@ -46,6 +50,9 @@ mailboxAccessRoutes.put("/", async (c) => {
     outcome: "success",
     metadata: { accessLevel: input.accessLevel }
   });
+  c.executionCtx.waitUntil(
+    ignoreMailEventFailure(publishUserMailEvent(c.env, input.userId, "mailboxes"))
+  );
   return c.body(null, 204);
 });
 
@@ -62,5 +69,8 @@ mailboxAccessRoutes.delete("/:mailboxId/:userId", async (c) => {
     resourceId: `${c.req.param("mailboxId")}:${c.req.param("userId")}`,
     outcome: "success"
   });
+  c.executionCtx.waitUntil(
+    ignoreMailEventFailure(publishUserMailEvent(c.env, c.req.param("userId"), "mailboxes"))
+  );
   return c.body(null, 204);
 });

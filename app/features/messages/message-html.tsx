@@ -1,20 +1,26 @@
-import { ImageOff } from "lucide-react";
 import * as React from "react";
+import { PiImageBroken } from "react-icons/pi";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { useTheme } from "@/features/theme/theme-provider";
 
 import { getMessageHtml, trustRemoteMediaSender } from "./api";
 import { buildEmailHtmlDocument } from "./html-document";
-import type { MessageDetail } from "./types";
+import { hasMessageHtmlContent, splitQuotedText } from "./message-html-content";
+import type { MessageDetail, MessageHtml as MessageHtmlResponse } from "./types";
+
+export { splitQuotedText } from "./message-html-content";
 
 type MessageHtmlProps = {
   message: MessageDetail;
+  quoteMode?: "expanded" | "hidden" | "interactive";
 };
 
-export function MessageHtml({ message }: MessageHtmlProps): React.ReactElement {
+export function MessageHtml({
+  message,
+  quoteMode = "interactive"
+}: MessageHtmlProps): React.ReactElement {
   const { theme } = useTheme();
   const [html, setHtml] = React.useState<Awaited<ReturnType<typeof getMessageHtml>> | null>(null);
   const [loadRemoteImages, setLoadRemoteImages] = React.useState(false);
@@ -45,7 +51,7 @@ export function MessageHtml({ message }: MessageHtmlProps): React.ReactElement {
 
   const rendered = React.useMemo(
     () =>
-      html === null
+      !html?.html
         ? null
         : buildEmailHtmlDocument({
             allowRemoteImages: loadRemoteImages,
@@ -66,6 +72,23 @@ export function MessageHtml({ message }: MessageHtmlProps): React.ReactElement {
           })
         : null,
     [html, loadRemoteImages, theme]
+  );
+  const renderedAfterQuote = React.useMemo(
+    () =>
+      html?.afterQuotedHtml
+        ? buildEmailHtmlDocument({
+            allowRemoteImages: loadRemoteImages,
+            html: html.afterQuotedHtml,
+            origin: window.location.origin,
+            theme
+          })
+        : null,
+    [html, loadRemoteImages, theme]
+  );
+  const bodyHasContent = React.useMemo(() => hasMessageHtmlContent(html?.html ?? ""), [html?.html]);
+  const quoteVisible = quoteMode === "expanded" || quoteExpanded || !bodyHasContent;
+  const showRemoteImagesAlert = Boolean(
+    html && !loadRemoteImages && hasVisibleRemoteImages(html, quoteVisible)
   );
 
   async function loadImages(): Promise<void> {
@@ -96,10 +119,10 @@ export function MessageHtml({ message }: MessageHtmlProps): React.ReactElement {
     }
   }
 
-  if (!rendered) {
+  if (!rendered && !renderedQuote && !renderedAfterQuote) {
     return (
       <>
-        <PlainTextMessage message={message} />
+        <PlainTextMessage message={message} quoteMode={quoteMode} />
         {error && <p className="mt-3 text-xs text-destructive">{error}</p>}
       </>
     );
@@ -107,7 +130,7 @@ export function MessageHtml({ message }: MessageHtmlProps): React.ReactElement {
 
   return (
     <div className="flex flex-col gap-4">
-      {html?.hasRemoteImages && !loadRemoteImages && (
+      {showRemoteImagesAlert && (
         <RemoteImagesAlert
           direction={message.direction}
           fromAddress={message.fromAddress}
@@ -118,20 +141,75 @@ export function MessageHtml({ message }: MessageHtmlProps): React.ReactElement {
         />
       )}
       {error && <p className="text-xs text-destructive">{error}</p>}
-      <EmailFrame srcDoc={rendered} title={`Message body: ${message.subject}`} />
-      {renderedQuote ? (
+      <MessageHtmlFrames
+        afterQuote={renderedAfterQuote}
+        body={rendered}
+        bodyHasContent={bodyHasContent}
+        onToggleQuote={
+          quoteMode === "interactive" ? () => setQuoteExpanded((expanded) => !expanded) : null
+        }
+        quote={renderedQuote}
+        quoteExpanded={quoteVisible}
+        subject={message.subject}
+      />
+    </div>
+  );
+}
+
+export function hasVisibleRemoteImages(
+  html: Pick<
+    MessageHtmlResponse,
+    "afterQuotedHtmlHasRemoteImages" | "htmlHasRemoteImages" | "quotedHtmlHasRemoteImages"
+  >,
+  quoteVisible: boolean
+): boolean {
+  return (
+    html.htmlHasRemoteImages ||
+    html.afterQuotedHtmlHasRemoteImages ||
+    (quoteVisible && html.quotedHtmlHasRemoteImages)
+  );
+}
+
+export function MessageHtmlFrames({
+  afterQuote,
+  body,
+  bodyHasContent,
+  onToggleQuote,
+  quote,
+  quoteExpanded,
+  subject
+}: {
+  afterQuote: string | null;
+  body: string | null;
+  bodyHasContent: boolean;
+  onToggleQuote: (() => void) | null;
+  quote: string | null;
+  quoteExpanded: boolean;
+  subject: string;
+}): React.ReactElement {
+  const showQuote = quoteExpanded || !bodyHasContent;
+
+  return (
+    <div className="contents" data-message-html-frames>
+      {body && bodyHasContent ? (
+        <EmailFrame srcDoc={body} title={`Message body: ${subject}`} />
+      ) : null}
+      {quote ? (
         <>
-          <QuotedContentDivider
-            expanded={quoteExpanded}
-            onToggle={() => setQuoteExpanded((expanded) => !expanded)}
-          />
-          {quoteExpanded ? (
-            <EmailFrame
-              srcDoc={renderedQuote}
-              title={`Quoted message history: ${message.subject}`}
-            />
+          {bodyHasContent && onToggleQuote ? (
+            <QuotedContentDivider expanded={quoteExpanded} onToggle={onToggleQuote} />
           ) : null}
+          <div
+            aria-hidden={!showQuote}
+            className={showQuote ? "block" : "hidden print:block"}
+            data-quoted-content-frame
+          >
+            <EmailFrame srcDoc={quote} title={`Quoted message history: ${subject}`} />
+          </div>
         </>
+      ) : null}
+      {afterQuote ? (
+        <EmailFrame srcDoc={afterQuote} title={`Message content after quote: ${subject}`} />
       ) : null}
     </div>
   );
@@ -208,20 +286,20 @@ export function QuotedContentDivider({
   onToggle: () => void;
 }): React.ReactElement {
   return (
-    <div className="flex items-center gap-2" data-quoted-content-control>
-      <Separator className="flex-1" />
-      <Button
+    <div className="flex justify-start print:hidden" data-quoted-content-control>
+      <button
         aria-expanded={expanded}
         aria-label={expanded ? "Hide quoted message history" : "Show quoted message history"}
-        className="h-6 min-w-10 rounded-full px-2 font-mono tracking-wider"
+        className="inline-flex h-5 w-8 cursor-pointer items-center justify-center rounded bg-muted text-muted-foreground transition-colors [@media(hover:hover)]:hover:bg-muted/80 [@media(hover:hover)]:hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onClick={onToggle}
-        size="sm"
         type="button"
-        variant="outline"
       >
-        ...
-      </Button>
-      <Separator className="flex-1" />
+        <span aria-hidden="true" className="inline-flex items-center gap-0.5">
+          <span className="size-[3px] rounded-full bg-current" data-quoted-content-dot />
+          <span className="size-[3px] rounded-full bg-current" data-quoted-content-dot />
+          <span className="size-[3px] rounded-full bg-current" data-quoted-content-dot />
+        </span>
+      </button>
     </div>
   );
 }
@@ -242,61 +320,77 @@ export function RemoteImagesAlert({
   savingTrust: boolean;
 }): React.ReactElement {
   return (
-    <Alert>
-      <ImageOff />
-      <AlertTitle>Remote images are hidden</AlertTitle>
-      <AlertDescription className="flex flex-col items-start gap-3">
-        <p>Loading them may tell the sender that you opened this message.</p>
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={loadingImages} onClick={onLoad} size="sm" type="button">
-            Load images
+    <Alert className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded-md border-border/60 bg-muted/50 px-2.5 py-1.5 text-xs sm:grid-cols-[auto_minmax(0,1fr)_auto] [&>svg]:static [&>svg]:size-3.5 [&>svg]:text-muted-foreground [&>svg~*]:pl-0">
+      <PiImageBroken />
+      <AlertTitle className="mb-0 min-w-0 line-clamp-2 text-[11px] font-semibold leading-[14px] tracking-normal">
+        Some remote images are hidden. Loading them may reveal that you opened this email.
+      </AlertTitle>
+      <AlertDescription className="col-start-2 row-start-2 flex flex-wrap gap-1 pt-0.5 sm:col-start-3 sm:row-start-1 sm:flex-nowrap sm:pt-0">
+        <Button
+          className="h-6 min-h-6 px-2 text-[10px]"
+          disabled={loadingImages}
+          onClick={onLoad}
+          size="sm"
+          type="button"
+        >
+          Load images
+        </Button>
+        {direction === "inbound" && (
+          <Button
+            className="h-6 min-h-6 px-2 text-[10px]"
+            disabled={savingTrust}
+            onClick={onAlwaysLoad}
+            size="sm"
+            title={`Always load remote images from ${fromAddress}`}
+            type="button"
+            variant="outline"
+          >
+            Always load from this sender
           </Button>
-          {direction === "inbound" && (
-            <Button
-              disabled={savingTrust}
-              onClick={onAlwaysLoad}
-              size="sm"
-              title={`Always load remote images from ${fromAddress}`}
-              type="button"
-              variant="outline"
-            >
-              Always load from sender
-            </Button>
-          )}
-        </div>
+        )}
       </AlertDescription>
     </Alert>
   );
 }
 
-export function PlainTextMessage({ message }: MessageHtmlProps): React.ReactElement {
+export function PlainTextMessage({
+  message,
+  quoteMode = "interactive"
+}: MessageHtmlProps): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false);
   const content = splitQuotedText(message.textBody || message.snippet);
+  const quoteVisible = quoteMode === "expanded" || expanded;
   return (
     <div className="flex flex-col gap-4">
-      <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-7 text-foreground/90">
-        {content.body}
-      </pre>
+      {content.body ? (
+        <pre className="whitespace-pre-wrap break-words font-[Arial,Helvetica,sans-serif] text-[small] leading-[1.5] text-foreground/90">
+          {content.body}
+        </pre>
+      ) : null}
       {content.quote ? (
         <>
-          <QuotedContentDivider expanded={expanded} onToggle={() => setExpanded((open) => !open)} />
-          {expanded ? (
-            <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-7 text-muted-foreground">
+          {quoteMode === "interactive" ? (
+            <QuotedContentDivider
+              expanded={expanded}
+              onToggle={() => setExpanded((open) => !open)}
+            />
+          ) : null}
+          <div
+            aria-hidden={!quoteVisible}
+            className={quoteVisible ? "block" : "hidden print:block"}
+            data-quoted-content-frame
+          >
+            <pre className="whitespace-pre-wrap break-words border-l border-border pl-[1ex] font-[Arial,Helvetica,sans-serif] text-[small] leading-[1.5] text-muted-foreground">
               {content.quote}
             </pre>
-          ) : null}
+          </div>
         </>
+      ) : null}
+      {content.afterQuote ? (
+        <pre className="whitespace-pre-wrap break-words font-[Arial,Helvetica,sans-serif] text-[small] leading-[1.5] text-foreground/90">
+          {content.afterQuote}
+        </pre>
       ) : null}
     </div>
   );
-}
-
-export function splitQuotedText(value: string): { body: string; quote: string | null } {
-  const match = /\n{1,2}On [^\n]+ wrote:\n>/i.exec(value.replace(/\r\n?/g, "\n"));
-  if (!match) return { body: value, quote: null };
-  const normalized = value.replace(/\r\n?/g, "\n");
-  return {
-    body: normalized.slice(0, match.index).trimEnd(),
-    quote: normalized.slice(match.index).trim()
-  };
 }

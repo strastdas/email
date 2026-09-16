@@ -3,13 +3,17 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { configPath } from "../../../scripts/hqbase/manifest.mjs";
 import {
+  assertRequiredActiveBindings,
   inspectActiveRelease,
   isDeployButtonBootstrap,
   parseActiveRelease
 } from "../../../scripts/release/active-version.mjs";
 import {
+  assertSourceDeployConfig,
   compareVersions,
+  deployConfiguration,
   deploySource,
   executeSql,
   hqbaseReleaseTag,
@@ -20,9 +24,27 @@ import {
   verifyManifest,
   workerNameFromConfig
 } from "../../../scripts/release/deploy.mjs";
+import {
+  assertRequiredWorkerConfig,
+  prepareRequiredWorkerConfig
+} from "../../../scripts/release/prepare-worker-config.mjs";
+import {
+  encodeVapidPrivateKey,
+  generateVapidKeys
+} from "../../../scripts/release/worker-deploy.mjs";
 import { foreignTrustees } from "../../../scripts/secure-directory.mjs";
 
 describe("HQBase release deployment", () => {
+  it("generates a standard P-256 VAPID key pair without package dependencies", () => {
+    const keys = generateVapidKeys();
+    expect(Buffer.from(keys.publicKey, "base64url")).toHaveLength(65);
+    expect(Buffer.from(keys.privateKey, "base64url")).toHaveLength(32);
+    expect(Buffer.from(keys.publicKey, "base64url")[0]).toBe(4);
+    expect(Buffer.from(encodeVapidPrivateKey(Buffer.alloc(31, 1)), "base64url")).toEqual(
+      Buffer.concat([Buffer.alloc(1), Buffer.alloc(31, 1)])
+    );
+  });
+
   it("verifies product-bound manifests", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const manifest = {
@@ -39,11 +61,43 @@ describe("HQBase release deployment", () => {
       signature: sign(null, Buffer.from(payload, "base64url"), privateKey).toString("base64url")
     };
     const encoded = publicKey.export({ type: "spki", format: "der" }).toString("base64");
-    expect(verifyManifest(envelope, encoded)).toMatchObject({ version: "1.2.3" });
+    expect(verifyManifest(envelope, encoded)).toMatchObject({ version: "1.2.3", notes: [] });
     const invalidSignature = `${envelope.signature.startsWith("A") ? "B" : "A"}${envelope.signature.slice(1)}`;
     expect(() => verifyManifest({ ...envelope, signature: invalidSignature }, encoded)).toThrow(
       "signature"
     );
+  });
+  it("verifies that a configuration deployment produced a new active version", () => {
+    const commands = [];
+    const versions = [
+      { missingBindings: [], versionId: "version-1", version: "1.2.3", tag: "hqbase:1.2.3" },
+      { missingBindings: [], versionId: "version-2", version: "1.2.3", tag: "hqbase:1.2.3" }
+    ];
+    const inspect = () => versions.shift() ?? versions[0];
+
+    expect(
+      deployConfiguration("/source", "hqbase-qa", "hqbase:1.2.3", {
+        inspect,
+        run: (command, args) => commands.push([command, ...args].join(" "))
+      })
+    ).toMatchObject({ versionId: "version-2" });
+    expect(commands[0]).toContain("wrangler deploy");
+    expect(commands[0]).toContain("--keep-vars");
+    expect(commands[0]).toContain("--strict");
+    expect(commands[0]).toContain("--tag hqbase:1.2.3");
+
+    const unchanged = {
+      missingBindings: [],
+      versionId: "version-1",
+      version: "1.2.3",
+      tag: "hqbase:1.2.3"
+    };
+    expect(() =>
+      deployConfiguration("/source", "hqbase-qa", "hqbase:1.2.3", {
+        inspect: () => unchanged,
+        run: () => {}
+      })
+    ).toThrowError(/new active version/);
   });
   it("selects only newer semantic releases", () => {
     expect(compareVersions("0.2.0", "0.1.9")).toBeGreaterThan(0);
@@ -107,20 +161,25 @@ describe("HQBase release deployment", () => {
     }
   });
   it("rebases customer deployment paths onto the verified release source", () => {
-    expect(
-      normalizeConfig(
-        {
-          name: "customer-worker",
-          main: "../../../worker/index.ts",
-          compatibility_flags: ["nodejs_compat"],
-          assets: { directory: "../../../dist", binding: "ASSETS" },
-          d1_databases: [{ binding: "DB", migrations_dir: "../../../migrations" }],
-          vars: { HQBASE_WORKER_NAME: "customer-worker" }
-        },
-        "0.1.1",
-        "b".repeat(64)
-      )
-    ).toMatchObject({
+    const normalized = normalizeConfig(
+      {
+        name: "customer-worker",
+        main: "../../../worker/index.ts",
+        compatibility_flags: ["nodejs_compat"],
+        assets: { directory: "../../../dist", binding: "ASSETS" },
+        d1_databases: [
+          {
+            binding: "DB",
+            migrations_dir: "../../../migrations",
+            migrations_pattern: "../../../migrations/**/*.sql"
+          }
+        ],
+        vars: { HQBASE_WORKER_NAME: "customer-worker" }
+      },
+      "0.1.1",
+      "b".repeat(64)
+    );
+    expect(normalized).toMatchObject({
       main: "worker/index.ts",
       compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"],
       assets: { directory: "./dist", binding: "ASSETS" },
@@ -131,6 +190,68 @@ describe("HQBase release deployment", () => {
         HQBASE_WORKER_NAME: "customer-worker"
       }
     });
+    expect(normalized.d1_databases[0]).not.toHaveProperty("migrations_pattern");
+  });
+  it("uses release-managed Worker configuration from the verified release", () => {
+    const deploymentConfig = {
+      name: "customer-worker",
+      assets: {
+        binding: "ASSETS",
+        directory: "../../../dist",
+        not_found_handling: "single-page-application",
+        run_worker_first: ["/api/*"]
+      },
+      durable_objects: {
+        bindings: [{ name: "CUSTOMER_EVENTS", class_name: "CustomerEvents" }]
+      },
+      migrations: [{ tag: "customer-events-v1", new_sqlite_classes: ["CustomerEvents"] }]
+    };
+    const previous = normalizeConfig(deploymentConfig, "1.2.0", "a".repeat(64), {});
+    expect(previous).not.toHaveProperty("durable_objects");
+    expect(previous).not.toHaveProperty("migrations");
+
+    const releaseConfig = {
+      assets: {
+        binding: "ASSETS",
+        directory: "./dist",
+        not_found_handling: "single-page-application",
+        run_worker_first: ["/api/*", "/management/*"]
+      },
+      durable_objects: {
+        bindings: [{ name: "MAIL_EVENTS", class_name: "MailEvents" }]
+      },
+      migrations: [{ tag: "mail-events-v1", new_sqlite_classes: ["MailEvents"] }]
+    };
+    const candidate = normalizeConfig(deploymentConfig, "1.3.0", "b".repeat(64), releaseConfig);
+    expect(candidate.assets).toEqual(releaseConfig.assets);
+    expect(candidate.durable_objects).toEqual(releaseConfig.durable_objects);
+    expect(candidate.migrations).toEqual(releaseConfig.migrations);
+  });
+  it("repairs required release configuration left out by an older updater", () => {
+    const staleConfig = {
+      assets: { binding: "ASSETS", directory: "./dist" },
+      d1_databases: [{ binding: "DB", database_id: "database-id" }],
+      durable_objects: {
+        bindings: [{ name: "CUSTOMER_EVENTS", class_name: "CustomerEvents" }]
+      },
+      migrations: [{ tag: "customer-events-v1", new_sqlite_classes: ["CustomerEvents"] }],
+      queues: { producers: [{ binding: "HQBASE_JOBS", queue: "jobs" }] },
+      r2_buckets: [{ binding: "MAIL_OBJECTS", bucket_name: "mail" }],
+      send_email: [{ name: "MAIL_SENDER" }]
+    };
+
+    const prepared = prepareRequiredWorkerConfig(staleConfig);
+
+    expect(prepared.assets.run_worker_first).toContain("/management/*");
+    expect(prepared.durable_objects.bindings).toEqual([
+      { name: "CUSTOMER_EVENTS", class_name: "CustomerEvents" },
+      { name: "MAIL_EVENTS", class_name: "MailEvents" }
+    ]);
+    expect(prepared.migrations).toEqual([
+      { tag: "customer-events-v1", new_sqlite_classes: ["CustomerEvents"] },
+      { tag: "mail-events-v1", new_sqlite_classes: ["MailEvents"] }
+    ]);
+    expect(() => assertRequiredWorkerConfig(prepared)).not.toThrow();
   });
   it("creates an immutable active-version tag from the signed HQBase artifact", () => {
     expect(hqbaseReleaseTag("0.1.5", "a".repeat(64))).toBe(`hqbase:0.1.5:${"a".repeat(64)}`);
@@ -151,6 +272,7 @@ describe("HQBase release deployment", () => {
     ).toEqual({
       versionId: "active-version",
       version: "0.1.14",
+      missingBindings: ["DB", "MAIL_OBJECTS", "HQBASE_JOBS", "MAIL_SENDER", "MAIL_EVENTS"],
       tag: `hqbase:0.1.14:${"a".repeat(64)}`
     });
     expect(() =>
@@ -159,6 +281,16 @@ describe("HQBase release deployment", () => {
         { id: "one", resources: { bindings: [] } }
       )
     ).toThrow("one active 100-percent version");
+  });
+  it("rejects an active release that Cloudflare reports without a required binding", () => {
+    expect(() =>
+      assertRequiredActiveBindings({
+        missingBindings: ["MAIL_EVENTS"],
+        versionId: "broken-version",
+        version: "1.3.0",
+        tag: "hqbase:1.3.0"
+      })
+    ).toThrow("MAIL_EVENTS");
   });
   it("distinguishes a fresh Worker from an existing active release", () => {
     expect(
@@ -171,6 +303,24 @@ describe("HQBase release deployment", () => {
         })
       })
     ).toBeNull();
+    expect(
+      inspectActiveRelease("/release", "customer-worker", {
+        attempt: () => ({
+          status: 1,
+          stdout: "",
+          stderr: "The Worker customer-worker has no deployments."
+        })
+      })
+    ).toBeNull();
+    expect(() =>
+      inspectActiveRelease("/release", "customer-worker", {
+        attempt: () => ({
+          status: 1,
+          stdout: "",
+          stderr: "Cloudflare API authentication failed"
+        })
+      })
+    ).toThrow("wrangler deployments status exited with 1");
     expect(
       inspectActiveRelease("/release", "customer-worker", {
         attempt: () => ({
@@ -229,10 +379,17 @@ describe("HQBase release deployment", () => {
     expect(workerNameFromConfig({ name: "hqbase-deeptake-test" })).toBe("hqbase-deeptake-test");
     expect(() => workerNameFromConfig({ name: "" })).toThrow("deployed Worker name");
   });
-  it("generates masked auth and Web Push secrets when the first Workers Build needs them", () => {
+  it("rejects managed configurations in forced-source mode", () => {
+    const repositoryConfig = resolve("wrangler.jsonc");
+
+    expect(assertSourceDeployConfig(repositoryConfig)).toBe(repositoryConfig);
+    expect(() => assertSourceDeployConfig(configPath("release-test"))).toThrow(
+      /HQBASE_FORCE_SOURCE_DEPLOY supports only the repository-root wrangler\.jsonc/
+    );
+  });
+  it("generates masked auth and Web Push secrets for a first deployment outside CI", () => {
     let secretFile;
     deploySource("/customer/repo", {
-      workersCi: true,
       workerName: "hqbase-deeptake-test",
       attempt: () => ({
         status: 0,
@@ -275,7 +432,6 @@ describe("HQBase release deployment", () => {
   it("preserves existing secrets and detects only missing installation secrets", () => {
     let deployCalls = 0;
     deploySource("/customer/repo", {
-      workersCi: true,
       workerName: "hqbase-deeptake-test",
       attempt: () => ({
         status: 0,
@@ -321,7 +477,6 @@ describe("HQBase release deployment", () => {
   });
   it("adds a VAPID pair to an existing installation without rotating its auth identity", () => {
     deploySource("/customer/repo", {
-      workersCi: true,
       workerName: "hqbase-existing",
       attempt: () => ({
         status: 0,
@@ -381,10 +536,13 @@ describe("HQBase release deployment", () => {
       not_found_handling: "single-page-application",
       run_worker_first: [
         "/api/*",
+        "/management/*",
         "/mcp",
         "/mcp/*",
         "/.well-known/*",
         "/skills/hqbase-mail/SKILL.md",
+        "/skills/hqbase-mailbox/SKILL.md",
+        "/skills/hqbase-provisioner/SKILL.md",
         "/AGENTS.md",
         "/agents.md"
       ]

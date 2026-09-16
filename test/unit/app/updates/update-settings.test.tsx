@@ -1,7 +1,25 @@
+// @vitest-environment happy-dom
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UpdateStatus } from "@/features/updates/types";
 import { UpdateSettings } from "@/features/updates/update-settings";
+import { flushHookEffects, renderComponent } from "../render-hook";
+
+const mocks = vi.hoisted(() => ({
+  applyUpdate: vi.fn(),
+  getUpdateStatus: vi.fn(),
+  getUpdateChannel: vi.fn(async () => ({ channel: "stable" })),
+  setUpdateChannel: vi.fn()
+}));
+
+vi.mock("@/features/updates/api", () => mocks);
+
+afterEach(() => {
+  document.body.replaceChildren();
+  window.history.replaceState(null, "", "/");
+  window.sessionStorage.clear();
+  vi.clearAllMocks();
+});
 
 const availableStatus: UpdateStatus = {
   product: "hqbase",
@@ -11,15 +29,81 @@ const availableStatus: UpdateStatus = {
   checkedAt: "2026-07-13T12:00:00.000Z",
   available: true,
   compatible: true,
+  repairRequired: false,
   release: {
     version: "0.2.0",
     schemaVersion: 10,
     publishedAt: "2026-07-13T12:00:00.000Z",
+    notes: ["Add contact suggestions.", "Fix draft recipient validation."],
     notesUrl: "https://example.com/releases/0.2.0"
   }
 };
 
 describe("update settings", () => {
+  it("explains the wait for Stable without offering an older version", () => {
+    const html = renderSettings({
+      ...availableStatus,
+      installedVersion: "0.3.0",
+      available: false,
+      waitingForStable: true
+    });
+    expect(html).toContain("Waiting for Stable");
+    expect(html).not.toContain("Install update");
+    expect(html).not.toContain("0.2.0");
+  });
+  it("saves owner opt-in without starting an update", async () => {
+    const nightly = { ...availableStatus, channel: "nightly" as const };
+    mocks.setUpdateChannel.mockResolvedValue({ channel: "nightly" });
+    mocks.getUpdateStatus.mockResolvedValue(nightly);
+    const view = await renderComponent(
+      <UpdateSettings
+        canChangeChannel
+        initialStatus={availableStatus}
+        progress={null}
+        onStatusChange={() => undefined}
+        onUpdateStarted={() => undefined}
+      />
+    );
+    await flushHookEffects(() =>
+      view.container.querySelector<HTMLButtonElement>("#nightly-updates")?.click()
+    );
+    expect(mocks.setUpdateChannel).toHaveBeenCalledWith("nightly");
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
+    expect(view.container.querySelector("#nightly-updates")?.getAttribute("aria-checked")).toBe(
+      "true"
+    );
+    await view.unmount();
+  });
+  it("lets an owner leave Nightly when release discovery is unavailable", async () => {
+    mocks.getUpdateChannel.mockResolvedValueOnce({ channel: "nightly" });
+    mocks.setUpdateChannel.mockResolvedValueOnce({ channel: "stable" });
+    mocks.getUpdateStatus.mockRejectedValueOnce(new Error("Update service is unavailable."));
+    const view = await renderComponent(
+      <UpdateSettings
+        canChangeChannel
+        initialStatus={null}
+        progress={null}
+        onStatusChange={() => undefined}
+        onUpdateStarted={() => undefined}
+      />
+    );
+    const checkbox = view.container.querySelector<HTMLButtonElement>("#nightly-updates");
+    expect(checkbox?.disabled).toBe(false);
+    expect(checkbox?.getAttribute("aria-checked")).toBe("true");
+    await flushHookEffects(() => checkbox?.click());
+    expect(mocks.setUpdateChannel).toHaveBeenCalledWith("stable");
+    expect(checkbox?.getAttribute("aria-checked")).toBe("false");
+    expect(view.container.textContent).toContain("Update service is unavailable.");
+    expect(checkbox?.disabled).toBe(false);
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+  it("disables the channel setting for admins", () => {
+    const html = renderSettings(availableStatus);
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    expect(container.querySelector("#nightly-updates")?.hasAttribute("disabled")).toBe(true);
+  });
   it("does not present an unknown update state as success", () => {
     const html = renderSettings(null);
     expect(html).toContain("Not checked");
@@ -40,7 +124,10 @@ describe("update settings", () => {
     expect(html).toContain("Available");
     expect(html).toContain("0.2.0");
     expect(html).not.toContain("HQBase 0.2.0");
-    expect(html).not.toContain("Read release notes");
+    expect(html).toContain("What’s changing");
+    expect(html).toContain("Add contact suggestions.");
+    expect(html).toContain("Fix draft recipient validation.");
+    expect(html).toContain("Read complete release notes");
     expect(html).not.toContain("Schema 10");
   });
 
@@ -55,7 +142,7 @@ describe("update settings", () => {
     const html = renderToStaticMarkup(
       <UpdateSettings
         initialStatus={availableStatus}
-        progress={{ buildId: "build-123", startedAt: Date.now() }}
+        progress={{ buildId: "build-123", kind: "update", startedAt: Date.now() }}
         onStatusChange={() => undefined}
         onUpdateStarted={() => undefined}
       />
@@ -65,6 +152,85 @@ describe("update settings", () => {
     expect(html).toContain("HQBase 0.2.0 is being deployed");
     expect(html).toContain("build-123");
     expect(html).not.toContain("Install update");
+  });
+
+  it("labels an accepted repair build separately", () => {
+    const html = renderToStaticMarkup(
+      <UpdateSettings
+        initialStatus={{
+          ...availableStatus,
+          installedVersion: "0.2.0",
+          repairRequired: true
+        }}
+        progress={{ buildId: "repair-123", kind: "repair", startedAt: Date.now() }}
+        onStatusChange={() => undefined}
+        onUpdateStarted={() => undefined}
+      />
+    );
+
+    expect(html).toContain("Installation repair in progress");
+    expect(html).toContain("repair-123");
+    expect(html).not.toContain("Finish repair");
+  });
+
+  it("renders persisted repair progress before update status loads", () => {
+    const html = renderToStaticMarkup(
+      <UpdateSettings
+        initialStatus={null}
+        progress={{ buildId: "repair-123", kind: "repair", startedAt: Date.now() }}
+        onStatusChange={() => undefined}
+        onUpdateStarted={() => undefined}
+      />
+    );
+
+    expect(html).toContain("Installation repair in progress");
+    expect(html).toContain("HQBase is completing its signed installation");
+    expect(html).toContain("repair-123");
+  });
+
+  it("offers one global same-release repair without changing customer source", () => {
+    const html = renderSettings({
+      ...availableStatus,
+      installedVersion: "0.2.0",
+      repairRequired: true
+    });
+
+    expect(html).toContain("Finish installation repair");
+    expect(html).toContain("Finish repair");
+    expect(html).toContain("fresh recovery checkpoint");
+    expect(html).toContain("will not change your source repository");
+    expect(html).not.toContain("What’s changing");
+    expect(html).not.toContain("Install update");
+  });
+
+  it("labels an apply failure after Cloudflare authorization as an update failure", async () => {
+    window.sessionStorage.setItem("hqb_update_expected_version", availableStatus.release.version);
+    window.sessionStorage.setItem("hqb_update_action_kind", "repair");
+    window.history.replaceState(
+      null,
+      "",
+      "/settings/updates?cloudflare=connected&settings=updates"
+    );
+    mocks.applyUpdate.mockRejectedValue(new Error("Invalid request body"));
+
+    const view = await renderComponent(
+      <UpdateSettings
+        initialStatus={{
+          ...availableStatus,
+          installedVersion: availableStatus.release.version,
+          repairRequired: true
+        }}
+        progress={null}
+        onStatusChange={() => undefined}
+        onUpdateStarted={() => undefined}
+      />
+    );
+
+    await vi.waitFor(() => expect(mocks.applyUpdate).toHaveBeenCalledWith("0.2.0"));
+    expect(view.container.textContent).toContain("Update could not start");
+    expect(view.container.textContent).toContain("Invalid request body");
+    expect(view.container.textContent).not.toContain("Update authorization unavailable");
+    await view.unmount();
   });
 });
 

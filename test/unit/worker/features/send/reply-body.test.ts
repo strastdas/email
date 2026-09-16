@@ -1,9 +1,10 @@
-import { buildReplyBody } from "@worker/features/send/reply-body";
+import { buildReplyBody, buildReplyChainContext } from "@worker/features/send/reply-body";
 import { describe, expect, it } from "vitest";
 
 const original = {
   createdAt: "2026-07-28T15:30:00.000Z",
   fromAddress: "owner@example.com",
+  fromName: null,
   receivedAt: "2026-07-28T15:29:00.000Z",
   sentAt: null,
   snippet: "Fallback",
@@ -40,6 +41,30 @@ describe("reply body", () => {
 
     expect(body.html).toContain("Second &lt;line&gt; &amp; more");
     expect(body.html).not.toContain("Second <line>");
+  });
+
+  it("builds one nested quote from separately stored thread messages", () => {
+    const context = buildReplyChainContext([
+      original,
+      {
+        ...original,
+        createdAt: "2026-07-28T15:35:00.000Z",
+        fromAddress: "support@example.com",
+        receivedAt: null,
+        sentAt: "2026-07-28T15:35:00.000Z",
+        snippet: "Latest reply",
+        textBody:
+          "Latest reply\n\nOn 2026-07-28 at 15:29 UTC, owner@example.com wrote:\n> Duplicate embedded original"
+      }
+    ]);
+
+    expect(context.text).toContain("Latest reply");
+    expect(context.text).toContain("First line");
+    expect(context.text).toContain("> > Second <line> & more");
+    expect(context.text).not.toContain("Duplicate embedded original");
+    expect(context.text.indexOf("Latest reply")).toBeLessThan(context.text.indexOf("First line"));
+    expect(context.html).toContain("Latest reply");
+    expect(context.html).toContain("First line");
   });
 
   it("bounds quoted message content", () => {

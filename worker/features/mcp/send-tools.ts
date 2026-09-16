@@ -1,18 +1,23 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { requireMailboxAccess } from "../../auth/mailbox-access";
+import { accessibleMessageScope, requireMailboxAccess } from "../../auth/mailbox-access";
 import type { WorkerEnv } from "../../lib/env";
 import { AppError } from "../../lib/errors";
 import { parseWith } from "../../lib/validation";
+import { operationalLog } from "../../observability/log";
 import { enforceRateLimit } from "../../security/rate-limit";
 import { recordAudit } from "../audit/service";
-import { requireDraftAttachmentIdsAccess, requireDraftIdAccess } from "../drafts/access";
+import { getAccessibleDraft, requireDraftAttachmentIdsAccess } from "../drafts/access";
+import { type MailEventScheduler, scheduleSentMailEvents } from "../events/service";
 import { findMailboxForSending } from "../mailboxes/queries";
-import { getMessageMailboxId } from "../messages/queries";
-import { forwardMessage } from "../send/forward";
+import { requireMessageAccess } from "../messages/access";
+import { forwardMessage, sendForwardDraft } from "../send/forward";
+import { identifySend, resumeSend } from "../send/operations";
 import { replyToMessage, sendNewMessage } from "../send/service";
 import { forwardMessageSchema, replyMessageSchema, sendMessageSchema } from "../send/validation";
+import { resolveSendSignature } from "../signatures/service";
+import { signatureSelectionSchema } from "../signatures/validation";
 
 import type { McpPrincipal } from "./route";
 import { toolResult } from "./tool-result";
@@ -23,7 +28,8 @@ const attachmentIds = z.array(z.string().min(1).max(100)).max(20).default([]);
 export function registerSendTools(
   server: McpServer,
   env: WorkerEnv,
-  principal: McpPrincipal
+  principal: McpPrincipal,
+  schedule: MailEventScheduler
 ): void {
   if (!principal.scopes.has("mail:send")) return;
 
@@ -41,7 +47,9 @@ export function registerSendTools(
         text: z.string().trim().min(1).max(100_000),
         html: z.string().trim().max(200_000).optional(),
         attachmentIds,
-        draftId: z.string().min(1).max(100).optional()
+        idempotencyKey: z.string().min(1).max(100).optional(),
+        draftId: z.string().min(1).max(100).optional(),
+        signature: signatureSelectionSchema.default({ mode: "automatic" })
       },
       annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
@@ -50,10 +58,41 @@ export function registerSendTools(
         await enforceSendRateLimit(env, principal.userId);
         const parsed = parseWith(sendMessageSchema, input);
         const mailboxId = await requireSendingAccess(env, principal, parsed.from);
-        await requireDraftIdAccess(env, principal, parsed.draftId);
+        const previous = await resumeSend(
+          env,
+          await identifySend(principal.userId, parsed, "send")
+        );
+        if (previous) return previous;
+        const draft = parsed.draftId
+          ? await getAccessibleDraft(env, principal, parsed.draftId)
+          : null;
+        const signature = await resolveSendSignature(
+          env.DB,
+          signaturePrincipal(principal),
+          { from: parsed.from, selection: parsed.signature },
+          draft
+        );
         await requireDraftAttachmentIdsAccess(env, principal, parsed.attachmentIds);
-        const message = await sendNewMessage(env, parsed, principal.userId);
-        await recordSend(env, principal, "mcp.message.send", mailboxId);
+        const message = draft?.forwardOfMessageId
+          ? await sendForwardDraft(
+              env,
+              parsed,
+              draft.id,
+              draft.forwardOfMessageId,
+              principal.userId,
+              signature
+            )
+          : await sendNewMessage(env, parsed, principal.userId, signature);
+        scheduleSentMailEvents(env, schedule, {
+          draftId: parsed.draftId,
+          mailboxId,
+          userId: principal.userId
+        });
+        schedule(
+          recordSend(env, principal, "mcp.message.send", mailboxId).catch(() =>
+            operationalLog("error", "send_audit_failed", {})
+          )
+        );
         return message;
       })
   );
@@ -72,7 +111,9 @@ export function registerSendTools(
         text: z.string().trim().min(1).max(100_000),
         html: z.string().trim().max(200_000).optional(),
         attachmentIds,
-        draftId: z.string().min(1).max(100).optional()
+        idempotencyKey: z.string().min(1).max(100).optional(),
+        draftId: z.string().min(1).max(100).optional(),
+        signature: signatureSelectionSchema.default({ mode: "automatic" })
       },
       annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
@@ -82,10 +123,44 @@ export function registerSendTools(
         const parsed = parseWith(replyMessageSchema, input);
         await requireSourceAccess(env, principal, parsed.messageId);
         const mailboxId = await requireSendingAccess(env, principal, parsed.from);
-        await requireDraftIdAccess(env, principal, parsed.draftId);
+        const previous = await resumeSend(
+          env,
+          await identifySend(principal.userId, parsed, "reply")
+        );
+        if (previous) return previous;
+        const draft = parsed.draftId
+          ? await getAccessibleDraft(env, principal, parsed.draftId)
+          : null;
+        const signature = await resolveSendSignature(
+          env.DB,
+          signaturePrincipal(principal),
+          { from: parsed.from, selection: parsed.signature },
+          draft
+        );
         await requireDraftAttachmentIdsAccess(env, principal, parsed.attachmentIds);
-        const message = await replyToMessage(env, parsed, principal.userId);
-        await recordSend(env, principal, "mcp.message.reply", mailboxId);
+        const messageScope = await accessibleMessageScope(
+          env.DB,
+          principal.userId,
+          principal.role,
+          "agent"
+        );
+        const message = await replyToMessage(
+          env,
+          parsed,
+          principal.userId,
+          signature,
+          messageScope
+        );
+        scheduleSentMailEvents(env, schedule, {
+          draftId: parsed.draftId,
+          mailboxId,
+          userId: principal.userId
+        });
+        schedule(
+          recordSend(env, principal, "mcp.message.reply", mailboxId).catch(() =>
+            operationalLog("error", "send_audit_failed", {})
+          )
+        );
         return message;
       })
   );
@@ -105,7 +180,9 @@ export function registerSendTools(
         text: z.string().trim().max(100_000).default(""),
         html: z.string().trim().max(200_000).optional(),
         attachmentIds,
-        includeOriginalAttachments: z.boolean().default(true)
+        idempotencyKey: z.string().min(1).max(100).optional(),
+        includeOriginalAttachments: z.boolean().default(true),
+        signature: signatureSelectionSchema.default({ mode: "automatic" })
       },
       annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
@@ -115,9 +192,23 @@ export function registerSendTools(
         const parsed = parseWith(forwardMessageSchema, input);
         await requireSourceAccess(env, principal, parsed.messageId);
         const mailboxId = await requireSendingAccess(env, principal, parsed.from);
+        const previous = await resumeSend(
+          env,
+          await identifySend(principal.userId, parsed, "forward")
+        );
+        if (previous) return previous;
         await requireDraftAttachmentIdsAccess(env, principal, parsed.attachmentIds);
-        const message = await forwardMessage(env, parsed, principal.userId);
-        await recordSend(env, principal, "mcp.message.forward", mailboxId);
+        const signature = await resolveSendSignature(env.DB, signaturePrincipal(principal), {
+          from: parsed.from,
+          selection: parsed.signature
+        });
+        const message = await forwardMessage(env, parsed, principal.userId, signature);
+        scheduleSentMailEvents(env, schedule, { mailboxId, userId: principal.userId });
+        schedule(
+          recordSend(env, principal, "mcp.message.forward", mailboxId).catch(() =>
+            operationalLog("error", "send_audit_failed", {})
+          )
+        );
         return message;
       })
   );
@@ -139,13 +230,7 @@ async function requireSourceAccess(
   principal: McpPrincipal,
   messageId: string
 ): Promise<void> {
-  await requireMailboxAccess(
-    env.DB,
-    principal.userId,
-    principal.role,
-    await getMessageMailboxId(env.DB, messageId),
-    "agent"
-  );
+  await requireMessageAccess(env.DB, principal.userId, principal.role, messageId, "agent");
 }
 
 function enforceSendRateLimit(env: WorkerEnv, userId: string): Promise<void> {
@@ -167,4 +252,8 @@ function recordSend(env: WorkerEnv, principal: McpPrincipal, action: string, mai
     resourceId: mailboxId,
     outcome: "success"
   });
+}
+
+function signaturePrincipal(principal: McpPrincipal) {
+  return { id: principal.userId, role: principal.role, type: "user" as const };
 }

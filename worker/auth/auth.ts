@@ -1,6 +1,22 @@
 import { oauthDeviceAuthorization, oauthProvider } from "@better-auth/oauth-provider";
 import { betterAuth } from "better-auth";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { admin } from "better-auth/plugins";
+import { createDatabase } from "../db/drizzle";
+import {
+  accounts,
+  deviceCodes,
+  oauthAccessTokens,
+  oauthClientAssertions,
+  oauthClientResources,
+  oauthClients,
+  oauthConsents,
+  oauthRefreshTokens,
+  oauthResources,
+  sessions,
+  users,
+  verifications
+} from "../db/schema";
 import { recordAudit } from "../features/audit/service";
 import { sendPasswordSetupEmail } from "../features/users/email";
 import type { WorkerEnv } from "../lib/env";
@@ -17,12 +33,40 @@ export function createAuth(
   backgroundTaskHandler?: BackgroundTaskHandler
 ) {
   const baseURL = authOrigin(env, request);
+  const mailApiResources = [mailApiResource(env, request), mailApiV1Resource(env, request)];
 
   return betterAuth({
     appName: "HQBase",
     basePath: "/api/auth",
     baseURL,
-    database: env.DB,
+    trustedOrigins: async (request) => {
+      if (!request) return [];
+      try {
+        const host = new URL(request.url).hostname;
+        if (host === "localhost" || host === "127.0.0.1") {
+          return ["http://localhost:5173", "http://127.0.0.1:5173"];
+        }
+      } catch {}
+      return [];
+    },
+    database: drizzleAdapter(createDatabase(env.DB), {
+      provider: "sqlite",
+      schema: {
+        account: accounts,
+        deviceCode: deviceCodes,
+        oauthAccessToken: oauthAccessTokens,
+        oauthClient: oauthClients,
+        oauthClientAssertion: oauthClientAssertions,
+        oauthClientResource: oauthClientResources,
+        oauthConsent: oauthConsents,
+        oauthRefreshToken: oauthRefreshTokens,
+        oauthResource: oauthResources,
+        session: sessions,
+        user: users,
+        verification: verifications
+      },
+      transaction: false
+    }),
     disabledPaths: ["/token"],
     secret: env.BETTER_AUTH_SECRET,
     ...(backgroundTaskHandler
@@ -44,6 +88,12 @@ export function createAuth(
         await sendPasswordSetupEmail(env, { user, url });
       },
       onPasswordReset: async ({ user }) => {
+        // Offline grants no longer depend on browser sessions.
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM oauthAccessToken WHERE userId = ?").bind(user.id),
+          env.DB.prepare("DELETE FROM oauthRefreshToken WHERE userId = ?").bind(user.id),
+          env.DB.prepare("DELETE FROM oauthConsent WHERE userId = ?").bind(user.id)
+        ]);
         const completedSetup = await completePasswordSetup(env.DB, user.id);
         await recordAudit(env.DB, {
           correlationId: crypto.randomUUID(),
@@ -77,26 +127,28 @@ export function createAuth(
         clientRegistrationAllowedResources: [
           mcpResource(env, request),
           mcpFullResource(env, request),
-          mailApiResource(env, request)
+          ...mailApiResources
         ],
-        clientRegistrationAllowedScopes: ["mail:write", "mail:send", "offline_access"],
+        clientRegistrationAllowedScopes: [
+          "mail:write",
+          "mail:send",
+          "signatures:manage",
+          "offline_access"
+        ],
         clientRegistrationDefaultScopes: ["mail:read"],
         consentPage: "/oauth/consent",
         disableJwtPlugin: true,
         grantTypes: ["authorization_code", "refresh_token"],
         loginPage: "/",
+        refreshTokenReuseInterval: 30,
         prefix: {
           clientSecret: "hqb_client_",
           opaqueAccessToken: "hqb_access_",
           refreshToken: "hqb_refresh_"
         },
-        scopes: ["mail:read", "mail:write", "mail:send", "offline_access"],
+        scopes: ["mail:read", "mail:write", "mail:send", "signatures:manage", "offline_access"],
         storeTokens: { hash: hashOAuthToken },
-        resources: [
-          mcpResource(env, request),
-          mcpFullResource(env, request),
-          mailApiResource(env, request)
-        ],
+        resources: [mcpResource(env, request), mcpFullResource(env, request), ...mailApiResources],
         enforcePerClientResources: false
       }),
       oauthDeviceAuthorization({
@@ -125,5 +177,9 @@ export function mcpFullResource(env: WorkerEnv, request: Request): string {
 }
 
 export function mailApiResource(env: WorkerEnv, request: Request): string {
+  return `${authOrigin(env, request)}/api/v2`;
+}
+
+export function mailApiV1Resource(env: WorkerEnv, request: Request): string {
   return `${authOrigin(env, request)}/api/v1`;
 }
