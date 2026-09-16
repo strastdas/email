@@ -2,6 +2,24 @@ import type { WorkerEnv } from "@worker/lib/env";
 import { AppError } from "@worker/lib/errors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const packageMock = vi.hoisted(() => ({ customSource: false }));
+
+vi.mock("../../../../../package.json", async (importOriginal) => {
+  const actual = await importOriginal<{ default: typeof import("../../../../../package.json") }>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      hqbaseRelease: {
+        ...actual.default.hqbaseRelease,
+        get customSource() {
+          return packageMock.customSource;
+        }
+      }
+    }
+  };
+});
+
 const mocks = vi.hoisted(() => ({
   operationalLog: vi.fn(),
   requireAuthContext: vi.fn(),
@@ -36,10 +54,12 @@ vi.mock("@worker/features/updates/channel", () => ({ setUpdateChannel: mocks.set
 vi.mock("@worker/observability/log", () => ({ operationalLog: mocks.operationalLog }));
 
 import { updateRoutes } from "@worker/features/updates/routes";
+import { apiRoutes } from "@worker/routes";
 
 describe("update routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    packageMock.customSource = false;
     mocks.requireAuthContext.mockResolvedValue({
       session: { createdAt: new Date(), id: "session-1", userId: "user-1" },
       user: { email: "owner@example.com", id: "user-1", name: "Owner", role: "owner" }
@@ -50,8 +70,8 @@ describe("update routes", () => {
   });
 
   it("restricts channel changes to owners and does not request Cloudflare access", async () => {
-    const response = await updateRoutes.request(
-      "/channel",
+    const response = await apiRoutes.request(
+      "/api/updates/channel",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -62,6 +82,64 @@ describe("update routes", () => {
     expect(response.status).toBe(200);
     expect(mocks.requireRole).toHaveBeenCalledWith(expect.anything(), ["owner"]);
     expect(mocks.setUpdateChannel).toHaveBeenCalledWith(undefined, "nightly");
+    expect(mocks.resolveRuntimeCloudflareGrant).not.toHaveBeenCalled();
+    expect(mocks.triggerUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects source builds before changing the update channel", async () => {
+    packageMock.customSource = true;
+
+    const response = await apiRoutes.request(
+      "/api/updates/channel",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ channel: "nightly" })
+      },
+      {} as WorkerEnv
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "UPDATE_CUSTOM_SOURCE" }
+    });
+    expect(mocks.setUpdateChannel).not.toHaveBeenCalled();
+    expect(mocks.resolveRuntimeCloudflareGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects source builds before starting the Cloudflare OAuth flow", async () => {
+    packageMock.customSource = true;
+
+    const response = await apiRoutes.request(
+      "/api/updates/cloudflare/oauth/start",
+      { method: "GET" },
+      {} as WorkerEnv
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "UPDATE_CUSTOM_SOURCE" }
+    });
+    expect(mocks.resolveRuntimeCloudflareGrant).not.toHaveBeenCalled();
+  });
+
+  it("rejects source builds before resolving a Cloudflare grant", async () => {
+    packageMock.customSource = true;
+
+    const response = await apiRoutes.request(
+      "/api/updates/apply",
+      {
+        body: JSON.stringify({ expectedVersion: "1.4.2" }),
+        headers: { "content-type": "application/json" },
+        method: "POST"
+      },
+      {} as WorkerEnv
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "UPDATE_CUSTOM_SOURCE" }
+    });
     expect(mocks.resolveRuntimeCloudflareGrant).not.toHaveBeenCalled();
     expect(mocks.triggerUpdate).not.toHaveBeenCalled();
   });

@@ -6,7 +6,8 @@
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "hqbaseRelease": {
-    "minimumVersion": "1.0.0"
+    "minimumVersion": "1.0.0",
+    "customSource": true
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",

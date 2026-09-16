@@ -39,7 +39,55 @@ const availableStatus: UpdateStatus = {
   }
 };
 
+const sourceStatus: UpdateStatus = {
+  ...availableStatus,
+  updateMethod: "source",
+  installedVersion: "1.4.2",
+  available: true,
+  waitingForStable: true,
+  repairRequired: true
+};
+
 describe("update settings", () => {
+  it("shows the package version and source deployment guidance for custom source", () => {
+    const html = renderSettings(sourceStatus);
+    expect(html).toContain("Current version");
+    expect(html).toContain("1.4.2");
+    expect(html).toContain(
+      "This installation uses custom source. Update it through your source repository and deployment process to keep your customization."
+    );
+    expect(html).not.toContain("Nightly");
+    expect(html).not.toContain("Waiting for Stable");
+    expect(html).not.toContain("Available");
+    expect(html).not.toContain("Install update");
+    expect(html).not.toContain("Finish repair");
+    expect(html).not.toContain("Cloudflare");
+  });
+
+  it("does not resume an OAuth update for a custom source installation", async () => {
+    window.sessionStorage.setItem("hqb_update_expected_version", "0.2.0");
+    window.history.replaceState(
+      null,
+      "",
+      "/settings/updates?cloudflare=connected&settings=updates"
+    );
+
+    const view = await renderComponent(
+      <UpdateSettings
+        initialStatus={sourceStatus}
+        progress={null}
+        onStatusChange={() => undefined}
+        onUpdateStarted={() => undefined}
+      />
+    );
+
+    await flushHookEffects();
+    expect(mocks.getUpdateChannel).not.toHaveBeenCalled();
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
+    expect(view.container.textContent).not.toContain("Authorize");
+    await view.unmount();
+  });
+
   it("explains the wait for Stable without offering an older version", () => {
     const html = renderSettings({
       ...availableStatus,

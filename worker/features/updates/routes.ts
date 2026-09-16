@@ -11,6 +11,7 @@ import type { HonoApp } from "../../lib/env";
 import { errorBody, toAppError } from "../../lib/errors";
 import { readJson } from "../../lib/json";
 import { parseWith } from "../../lib/validation";
+import { assertManagedUpdates } from "../../lib/version";
 import { operationalLog } from "../../observability/log";
 import {
   clearRuntimeCloudflareGrantCookie,
@@ -45,6 +46,7 @@ updateRoutes.get("/channel", async (c) => {
 updateRoutes.post("/channel", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
   requireRole(auth, ["owner"]);
+  assertManagedUpdates();
   const input = parseWith(
     z.object({ channel: z.enum(["stable", "nightly"]) }).strict(),
     await readJson(c.req.raw)
@@ -55,6 +57,7 @@ updateRoutes.post("/channel", async (c) => {
 updateRoutes.get("/cloudflare/oauth/start", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
   requireRole(auth, ["owner", "admin"]);
+  assertManagedUpdates();
   if (!isRecentSession(auth)) {
     return recentAuthenticationRedirect(c.req.raw, "updates");
   }
@@ -67,6 +70,7 @@ updateRoutes.post("/apply", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
   requireRole(auth, ["owner", "admin"]);
   requireRecentSession(auth);
+  assertManagedUpdates();
   const input = parseWith(applyUpdateSchema, await readJson(c.req.raw));
   const grant = await resolveRuntimeCloudflareGrant(c.req.raw, c.env);
   const outcome = await triggerUpdate(c.env, grant, input.expectedVersion).then(

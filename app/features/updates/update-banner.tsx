@@ -15,6 +15,7 @@ export function UpdateBanner({
   status: UpdateStatus | null;
   onOpen: () => void;
 }): React.ReactElement | null {
+  if (status?.updateMethod === "source") return null;
   const repairOnly =
     status?.repairRequired === true && status.release.version === status.installedVersion;
   if ((ready && !repairOnly) || (!inProgress && !status?.available)) return null;

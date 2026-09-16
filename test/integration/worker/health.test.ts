@@ -1,5 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import sourcePackage from "../../../package.json";
 
 describe("Worker health", () => {
   it("serves the API health endpoint inside workerd", async () => {
@@ -9,7 +10,7 @@ describe("Worker health", () => {
     await expect(response.json()).resolves.toMatchObject({
       ok: true,
       service: "hqbase",
-      version: null
+      version: sourcePackage.version
     });
   });
 });

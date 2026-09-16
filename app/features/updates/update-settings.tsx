@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { CloudflareAuthorizationDialog } from "@/features/settings/cloudflare-authorization-dialog";
 import { SettingsSection } from "@/features/settings/settings-section";
 import { applyUpdate, getUpdateChannel, getUpdateStatus, setUpdateChannel } from "./api";
+import { SourceInstallation } from "./source-installation";
 import type { UpdateStatus } from "./types";
 import type { UpdateActionKind, UpdateProgress } from "./update-progress";
 
@@ -38,6 +39,7 @@ export function UpdateSettings({
   const resumedRef = React.useRef(false);
 
   React.useEffect(() => {
+    if (initialStatus?.updateMethod === "source") return;
     let active = true;
     void getUpdateChannel()
       .then((result) => {
@@ -52,13 +54,17 @@ export function UpdateSettings({
     return () => {
       active = false;
     };
-  }, []);
+  }, [initialStatus?.updateMethod]);
 
   React.useEffect(() => {
     setStatus(initialStatus);
   }, [initialStatus]);
 
   React.useEffect(() => {
+    if (status?.updateMethod === "source") {
+      setAuthorizationOpen(false);
+      return;
+    }
     if (resumedRef.current) return;
     const url = new URL(window.location.href);
     if (url.searchParams.get("reauth") === "required") {
@@ -97,7 +103,7 @@ export function UpdateSettings({
         setApplyError(nextError instanceof Error ? nextError.message : "Update could not start.");
       })
       .finally(() => setPendingAction(null));
-  }, [onUpdateStarted]);
+  }, [onUpdateStarted, status?.updateMethod]);
 
   async function check(): Promise<void> {
     setPendingAction("check");
@@ -140,6 +146,16 @@ export function UpdateSettings({
   const repairOnly =
     status?.repairRequired === true && status.release.version === status.installedVersion;
   const repairInProgress = progress?.kind === "repair";
+  const sourceInstallation = status?.updateMethod === "source";
+  const sourceVersion = status?.installedVersion ?? "Unknown";
+
+  if (sourceInstallation) {
+    return (
+      <SettingsSection description="Custom source installation" title="Updates">
+        <SourceInstallation version={sourceVersion} />
+      </SettingsSection>
+    );
+  }
 
   return (
     <SettingsSection description="Signed Stable and Nightly releases" title="Updates">

@@ -4,6 +4,21 @@ import type { UpdateStatus } from "@/features/updates/types";
 import { UpdateBanner } from "@/features/updates/update-banner";
 
 describe("update banner", () => {
+  it("suppresses stale update state for custom source installations", () => {
+    const status = {
+      updateMethod: "source",
+      installedVersion: "1.4.2",
+      available: true,
+      repairRequired: true,
+      release: { version: "1.5.0", notes: ["Unrelated release note."] }
+    } as unknown as UpdateStatus;
+    const html = renderToStaticMarkup(
+      <UpdateBanner inProgress onOpen={() => undefined} ready={false} status={status} />
+    );
+
+    expect(html).toBe("");
+  });
+
   it("announces a newer HQBase release outside Settings", () => {
     const status = {
       installedVersion: "0.1.0",

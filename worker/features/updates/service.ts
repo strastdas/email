@@ -3,6 +3,12 @@ import { getSetting } from "../../db/client";
 import type { WorkerEnv } from "../../lib/env";
 import { AppError } from "../../lib/errors";
 import { hqbaseProductConfig } from "../../lib/product-config";
+import {
+  assertManagedUpdates,
+  compareVersions,
+  isCustomSourceBuild,
+  runningVersion
+} from "../../lib/version";
 import { withUpdateBuildLock } from "./build-lock";
 import {
   assertManagedTrigger,
@@ -29,6 +35,7 @@ import { inspectManagedMigrationState, type ManagedMigrationState } from "./migr
 import type { ReleaseManifest, UpdateStatus } from "./types";
 import { findZoneAccount } from "./zone-account";
 
+export { compareVersions } from "../../lib/version";
 export { isManagedDeployCommand, managedDeployCommand, managedUpdaterLoader };
 
 const envelopeSchema = z.object({ payload: z.string().min(1), signature: z.string().min(1) });
@@ -64,7 +71,7 @@ export async function getUpdateStatus(
   env: WorkerEnv,
   fetcher: typeof fetch = fetch
 ): Promise<UpdateStatus> {
-  const installedVersion = env.HQBASE_APP_VERSION ?? "0.1.1";
+  const installedVersion = runningVersion(env);
   const stable = await fetchRelease(
     env,
     fetcher,
@@ -138,9 +145,10 @@ async function releaseStatus(
       503
     );
   }
+  const customSource = isCustomSourceBuild();
   const releaseComparison = compareVersions(release.version, installedVersion);
   let migrationState: ManagedMigrationState | null = null;
-  if (releaseComparison === 0) {
+  if (!customSource && releaseComparison === 0) {
     try {
       migrationState = await inspectManagedMigrationState(
         env.DB,
@@ -158,13 +166,15 @@ async function releaseStatus(
   const repairRequired = migrationState?.repairRequired ?? false;
   return {
     product: "hqbase",
+    updateMethod: customSource ? "source" : "managed",
     installedVersion,
     installedSchemaVersion: installed.installed_schema_version,
     channel,
-    waitingForStable: channel === "stable" && releaseComparison < 0,
+    waitingForStable: !customSource && channel === "stable" && releaseComparison < 0,
     checkedAt: new Date().toISOString(),
-    available: releaseComparison > 0 || repairRequired,
+    available: !customSource && (releaseComparison > 0 || repairRequired),
     compatible:
+      !customSource &&
       compareVersions(installedVersion, release.minVersion) >= 0 &&
       release.schemaVersion >= installed.installed_schema_version &&
       compareVersions(release.version, installed.installed_version) >= 0,
@@ -179,6 +189,7 @@ export async function triggerUpdate(
   expectedVersion: string,
   fetcher: typeof fetch = fetch
 ): Promise<{ buildId: string; status: string }> {
+  assertManagedUpdates();
   const update = await getUpdateStatus(env, fetcher);
   if (update.release.version !== expectedVersion) {
     throw new AppError(
@@ -372,16 +383,6 @@ async function verifyEnvelope(
     decodeBase64UrlBytes(envelope.signature),
     decodeBase64UrlBytes(envelope.payload)
   );
-}
-export function compareVersions(left: string, right: string): number {
-  const a = (left.split("-")[0] ?? "0").split(".").map(Number);
-  const b = (right.split("-")[0] ?? "0").split(".").map(Number);
-  for (let index = 0; index < 3; index += 1) {
-    const leftPart = a[index] ?? 0;
-    const rightPart = b[index] ?? 0;
-    if (leftPart !== rightPart) return leftPart - rightPart;
-  }
-  return left.includes("-") === right.includes("-") ? 0 : left.includes("-") ? -1 : 1;
 }
 function decodeBase64(value: string): ArrayBuffer {
   return Uint8Array.from(atob(value), (character) => character.charCodeAt(0)).buffer as ArrayBuffer;

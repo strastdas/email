@@ -14,7 +14,26 @@ import {
   triggerUpdate
 } from "@worker/features/updates/service";
 import type { WorkerEnv } from "@worker/lib/env";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import sourcePackage from "../../../../../package.json";
+
+const packageMock = vi.hoisted(() => ({ customSource: false }));
+
+vi.mock("../../../../../package.json", async (importOriginal) => {
+  const actual = await importOriginal<{ default: typeof import("../../../../../package.json") }>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      hqbaseRelease: {
+        ...actual.default.hqbaseRelease,
+        get customSource() {
+          return packageMock.customSource;
+        }
+      }
+    }
+  };
+});
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const publicKeyBase64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
@@ -50,6 +69,10 @@ const envelope = {
 };
 
 describe("HQBase updates", () => {
+  beforeEach(() => {
+    packageMock.customSource = false;
+  });
+
   function signedRelease(channel: "stable" | "nightly", version: string) {
     const release = {
       ...JSON.parse(Buffer.from(payload, "base64url").toString()),
@@ -123,6 +146,42 @@ describe("HQBase updates", () => {
     });
     expect(status.release.notes).toEqual(["Add a signed changelog."]);
     expect(compareVersions("0.2.0", "0.1.9")).toBeGreaterThan(0);
+  });
+  it.each([
+    sourcePackage.version,
+    "999.0.0"
+  ])("marks a custom source build and suppresses managed release offers for a %s signed release", async (releaseVersion) => {
+    packageMock.customSource = true;
+    const environment = updateEnvironment("0.0.1", 0, false, "stable", 7);
+    const prepare = vi.spyOn(environment.DB, "prepare");
+
+    await expect(
+      getUpdateStatus(environment, async () =>
+        Response.json(signedRelease("stable", releaseVersion))
+      )
+    ).resolves.toMatchObject({
+      updateMethod: "source",
+      installedVersion: sourcePackage.version,
+      installedSchemaVersion: 7,
+      available: false,
+      compatible: false,
+      repairRequired: false,
+      waitingForStable: false,
+      release: { version: releaseVersion }
+    });
+    expect(prepare.mock.calls.some(([query]) => query.includes("sqlite_schema"))).toBe(false);
+    expect(prepare.mock.calls.some(([query]) => /\b(?:INSERT|UPDATE|DELETE)\b/i.test(query))).toBe(
+      false
+    );
+  });
+  it("rejects a direct update before making any network request for a custom source build", async () => {
+    packageMock.customSource = true;
+    const fetcher = vi.fn();
+
+    await expect(
+      triggerUpdate(updateEnvironment(), "unused", "1.4.2", fetcher as typeof fetch)
+    ).rejects.toMatchObject({ code: "UPDATE_CUSTOM_SOURCE", status: 409 });
+    expect(fetcher).not.toHaveBeenCalled();
   });
   it("does not require the current release ledger before a supported older version updates", async () => {
     const environment = updateEnvironment("0.0.9");

@@ -1,5 +1,6 @@
 export type UpdateStatus = {
   product: "hqbase";
+  updateMethod?: "source" | "managed";
   installedVersion: string;
   installedSchemaVersion: number;
   channel: "stable" | "nightly";

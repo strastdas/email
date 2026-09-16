@@ -16,6 +16,7 @@ export type ReleaseManifest = {
 export type UpdateStatus = {
   product: "hqbase";
   installedVersion: string;
+  updateMethod: "source" | "managed";
   installedSchemaVersion: number;
   channel: "stable" | "nightly";
   waitingForStable?: boolean;
