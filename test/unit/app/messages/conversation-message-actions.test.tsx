@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConversationMessages } from "@/features/messages/conversation-messages";
 import type { MessageDetail } from "@/features/messages/types";
@@ -50,29 +50,127 @@ const secondMessage: MessageDetail = {
   createdAt: "2026-07-27T14:05:00.000Z"
 };
 
+afterEach(() => {
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+});
+
 describe("conversation message actions", () => {
-  it("targets the exact message selected for Reply or Forward", async () => {
+  it("targets every expanded message for compose and folder actions", async () => {
     const onCompose = vi.fn();
+    const onMessageAction = vi.fn().mockResolvedValue(undefined);
     const view = await renderComponent(
-      <ConversationMessages messages={[firstMessage, secondMessage]} onCompose={onCompose} />
+      <ConversationMessages
+        messages={[firstMessage, secondMessage]}
+        onCompose={onCompose}
+        onMessageAction={onMessageAction}
+      />
     );
+    document.body.appendChild(view.container);
 
     const firstReply = view.container.querySelector<HTMLButtonElement>(
       '[data-compose-action="reply"][data-compose-message-id="msg_1"]'
     );
-    const secondForward = view.container.querySelector<HTMLButtonElement>(
+    const lastForward = view.container.querySelector<HTMLButtonElement>(
       '[data-compose-action="forward"][data-compose-message-id="msg_2"]'
     );
+    expect(
+      view.container.querySelector<HTMLElement>('[data-thread-message-id="msg_1"]')?.className
+    ).toContain("pt-2");
+    expect(
+      view.container.querySelector<HTMLElement>('[data-thread-message-id="msg_2"]')?.className
+    ).toContain("pt-5");
+    expect(firstReply?.className).toContain("h-8");
+    expect(lastForward?.className).toContain("h-9");
     await flushHookEffects(() => firstReply?.click());
-    await flushHookEffects(() => secondForward?.click());
+    await flushHookEffects(() => lastForward?.click());
 
     expect(onCompose).toHaveBeenNthCalledWith(1, firstMessage, "reply");
     expect(onCompose).toHaveBeenNthCalledWith(2, secondMessage, "forward");
 
+    const messageActions = view.container.querySelector<HTMLButtonElement>(
+      '[data-message-actions-id="msg_1"]'
+    );
+    await flushHookEffects(() => {
+      messageActions?.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" })
+      );
+      messageActions?.click();
+    });
+    const menu = document.body.querySelector<HTMLElement>('[data-message-actions-menu="msg_1"]');
+    expect(menu?.textContent).toContain("Archive message");
+    expect(menu?.textContent).toContain("Move to trash");
+    await flushHookEffects(() =>
+      menu?.querySelector<HTMLElement>('[data-message-action="archive"]')?.click()
+    );
+    expect(onMessageAction).toHaveBeenCalledWith(firstMessage, "archive");
+
     await view.unmount();
   });
 
-  it("switches the counted thread control between outward and inward arrows", async () => {
+  it("offers Restore instead of Archive or Trash for one trashed message", async () => {
+    const trashedMessage = { ...firstMessage, folder: "trash" as const };
+    const onMessageAction = vi.fn().mockResolvedValue(undefined);
+    const view = await renderComponent(
+      <ConversationMessages messages={[trashedMessage]} onMessageAction={onMessageAction} />
+    );
+    document.body.appendChild(view.container);
+
+    const trigger = view.container.querySelector<HTMLButtonElement>(
+      '[data-message-actions-id="msg_1"]'
+    );
+    await flushHookEffects(() => {
+      trigger?.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" })
+      );
+      trigger?.click();
+    });
+    const menu = document.body.querySelector<HTMLElement>('[data-message-actions-menu="msg_1"]');
+    expect(menu?.textContent).toContain("Restore message");
+    expect(menu?.textContent).not.toContain("Archive message");
+    expect(menu?.textContent).not.toContain("Move to trash");
+    await flushHookEffects(() =>
+      menu?.querySelector<HTMLElement>('[data-message-action="restore"]')?.click()
+    );
+    expect(onMessageAction).toHaveBeenCalledWith(trashedMessage, "restore");
+
+    await view.unmount();
+  });
+
+  it("tracks pending actions for each message independently", async () => {
+    const resolvers = new Map<string, () => void>();
+    const onMessageAction = vi.fn(
+      (message: MessageDetail) =>
+        new Promise<void>((resolve) => {
+          resolvers.set(message.id, resolve);
+        })
+    );
+    const view = await renderComponent(
+      <ConversationMessages
+        messages={[firstMessage, secondMessage]}
+        onMessageAction={onMessageAction}
+      />
+    );
+    document.body.appendChild(view.container);
+
+    await selectArchive(view.container, firstMessage.id);
+    expect(messageActionTrigger(view.container, firstMessage.id)?.disabled).toBe(true);
+    expect(messageActionTrigger(view.container, secondMessage.id)?.disabled).toBe(false);
+
+    await selectArchive(view.container, secondMessage.id);
+    expect(onMessageAction).toHaveBeenCalledTimes(2);
+    expect(messageActionTrigger(view.container, secondMessage.id)?.disabled).toBe(true);
+
+    await flushHookEffects(() => resolvers.get(firstMessage.id)?.());
+    expect(messageActionTrigger(view.container, firstMessage.id)?.disabled).toBe(false);
+    expect(messageActionTrigger(view.container, secondMessage.id)?.disabled).toBe(true);
+
+    await flushHookEffects(() => resolvers.get(secondMessage.id)?.());
+    expect(messageActionTrigger(view.container, secondMessage.id)?.disabled).toBe(false);
+    await view.unmount();
+  });
+
+  it("removes the counted thread control after it reveals the hidden messages", async () => {
     const messages = Array.from({ length: 4 }, (_, index) => ({
       ...firstMessage,
       id: `msg_${index + 1}`,
@@ -90,13 +188,75 @@ describe("conversation message actions", () => {
 
     await flushHookEffects(() => control?.click());
 
-    expect(control?.getAttribute("aria-label")).toBe("Collapse 2 earlier messages");
-    expect(control?.getAttribute("data-thread-disclosure-state")).toBe("expanded");
-    expect(control?.querySelector('[data-thread-arrow="top-inward"]')).not.toBeNull();
-    expect(control?.querySelector('[data-thread-arrow="bottom-inward"]')).not.toBeNull();
+    expect(view.container.querySelector("[data-thread-messages-control]")).toBeNull();
     expect(view.container.textContent).toContain("Message body 2");
     expect(view.container.textContent).toContain("Message body 3");
+
+    const newMessage = {
+      ...firstMessage,
+      id: "msg_5",
+      textBody: "Message body 5"
+    };
+    await view.rerender(<ConversationMessages messages={[...messages, newMessage]} />);
+
+    expect(view.container.querySelector("[data-thread-messages-control]")).toBeNull();
+    expect(view.container.textContent).toContain("Message body 2");
+    expect(view.container.textContent).toContain("Message body 4");
+
+    await view.rerender(
+      <ConversationMessages
+        messages={[...messages, newMessage].map((message) => ({
+          ...message,
+          threadId: "thr_2"
+        }))}
+      />
+    );
+
+    expect(view.container.querySelector("[data-thread-messages-control]")).not.toBeNull();
+
+    await view.unmount();
+  });
+
+  it("shows quoted-history disclosure on a revealed second-to-last message", async () => {
+    const messages = Array.from({ length: 4 }, (_, index) => ({
+      ...firstMessage,
+      id: `msg_${index + 1}`,
+      textBody:
+        index === 2
+          ? "Current reply\n\nOn Aug 20, 2026, Pat <pat@example.com> wrote:\n\n> Earlier reply"
+          : `Message body ${index + 1}`
+    }));
+    const view = await renderComponent(<ConversationMessages messages={messages} />);
+    const threadControl = view.container.querySelector<HTMLButtonElement>(
+      "[data-thread-disclosure-state]"
+    );
+
+    await flushHookEffects(() => threadControl?.click());
+
+    const secondToLast = view.container.querySelector('[data-thread-message-id="msg_3"]');
+    expect(secondToLast?.querySelector("[data-quoted-content-control]")).not.toBeNull();
 
     await view.unmount();
   });
 });
+
+function messageActionTrigger(container: HTMLElement, messageId: string): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(`[data-message-actions-id="${messageId}"]`);
+}
+
+async function selectArchive(container: HTMLElement, messageId: string): Promise<void> {
+  const trigger = messageActionTrigger(container, messageId);
+  await flushHookEffects(() => {
+    trigger?.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" })
+    );
+    trigger?.click();
+  });
+  await flushHookEffects(() =>
+    document.body
+      .querySelector<HTMLElement>(
+        `[data-message-actions-menu="${messageId}"] [data-message-action="archive"]`
+      )
+      ?.click()
+  );
+}

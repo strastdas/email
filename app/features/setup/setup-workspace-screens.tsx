@@ -1,7 +1,15 @@
-import { CircleAlert, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
 import * as React from "react";
+import { PiDotsThree, PiEye, PiEyeSlash, PiPlus, PiTrash, PiWarningCircle } from "react-icons/pi";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from "@/components/ui/dropdown-menu";
+import { DropdownSelect } from "@/components/ui/dropdown-select";
 import {
   Field,
   FieldDescription,
@@ -12,14 +20,6 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select";
-import {
   Table,
   TableBody,
   TableCell,
@@ -27,9 +27,12 @@ import {
   TableHeader,
   TableRow
 } from "@/components/ui/table";
+import { DomainSuffixInput } from "@/features/domains/domain-suffix-input";
 import { LOGIN_EMAIL_HINT } from "@/lib/login-email";
+import { SetupCatchAllSettings } from "./setup-catch-all-settings";
 import type { MailboxDraft, MailboxErrors, OwnerErrors } from "./setup-validation";
 import { WizardActions, WizardPanel } from "./setup-wizard-parts";
+import type { SetupCatchAllSelection } from "./types";
 
 export type { MailboxDraft } from "./setup-validation";
 
@@ -117,16 +120,16 @@ export function OwnerStep({
             <Button
               aria-label={passwordVisible ? "Hide password" : "Show password"}
               aria-pressed={passwordVisible}
-              className="absolute right-1 top-1/2 size-7 -translate-y-1/2"
+              className="absolute right-1 top-1/2 size-10 min-h-10 min-w-10 -translate-y-1/2"
               size="icon"
               type="button"
               variant="ghost"
               onClick={() => setPasswordVisible((visible) => !visible)}
             >
               {passwordVisible ? (
-                <EyeOff aria-hidden="true" className="size-4" />
+                <PiEyeSlash aria-hidden="true" className="size-4" />
               ) : (
-                <Eye aria-hidden="true" className="size-4" />
+                <PiEye aria-hidden="true" className="size-4" />
               )}
             </Button>
           </div>
@@ -138,7 +141,9 @@ export function OwnerStep({
 }
 
 export function MailboxStep({
+  catchAllByDomain,
   defaultFromMailboxAddress,
+  domains,
   errors,
   isPending,
   mailboxes,
@@ -147,10 +152,14 @@ export function MailboxStep({
   onComplete,
   onRemove,
   onSetDefaultFromMailboxAddress,
+  onSetCatchAllMailbox,
+  onSetCatchAllPolicy,
   onUpdate,
   submitError
 }: {
+  catchAllByDomain: Record<string, SetupCatchAllSelection>;
   defaultFromMailboxAddress: string;
+  domains: string[];
   errors: MailboxErrors;
   isPending: boolean;
   mailboxes: MailboxDraft[];
@@ -159,6 +168,8 @@ export function MailboxStep({
   onComplete: () => void;
   onRemove: (index: number) => void;
   onSetDefaultFromMailboxAddress: (address: string) => void;
+  onSetCatchAllMailbox: (domain: string, address: string) => void;
+  onSetCatchAllPolicy: (domain: string, policy: SetupCatchAllSelection["policy"]) => void;
   onUpdate: (index: number, patch: Partial<MailboxDraft>) => void;
   submitError: string | null;
 }): React.ReactElement {
@@ -180,11 +191,11 @@ export function MailboxStep({
       <div className="overflow-hidden rounded-md border">
         <Table aria-label="Mailboxes" className="table-fixed">
           <TableHeader className="bg-muted/35">
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="h-8 w-10 px-2 text-center text-xs">#</TableHead>
-              <TableHead className="h-8 px-2 text-xs">Email address</TableHead>
-              <TableHead className="h-8 w-[34%] px-2 text-xs">Display name</TableHead>
-              <TableHead className="h-8 w-10 px-1">
+            <TableRow className="[@media(hover:hover)]:hover:bg-transparent">
+              <TableHead className="w-10 px-2 text-center">#</TableHead>
+              <TableHead className="px-2">Email address</TableHead>
+              <TableHead className="w-[34%] px-2">Sender name</TableHead>
+              <TableHead className="w-10 px-1">
                 <span className="sr-only">Actions</span>
               </TableHead>
             </TableRow>
@@ -194,47 +205,65 @@ export function MailboxStep({
               const error = errors.rows[index] ?? {};
               return (
                 <TableRow key={index}>
-                  <TableCell className="px-2 py-1.5 text-center text-xs text-muted-foreground">
+                  <TableCell className="px-2 py-1 text-center text-xs text-muted-foreground">
                     {index + 1}
                   </TableCell>
-                  <TableCell className="p-1.5">
+                  <TableCell className="p-1">
                     <Field className="gap-1" data-invalid={Boolean(error.address)}>
                       {error.address ? <FieldError>{error.address}</FieldError> : null}
-                      <Input
-                        aria-label={`Mailbox ${index + 1} email address`}
-                        aria-invalid={Boolean(error.address)}
-                        className="h-8 shadow-none"
-                        type="email"
+                      <DomainSuffixInput
+                        ariaLabel={`Mailbox ${index + 1} email address`}
+                        className="shadow-none"
+                        domains={domains.map((domain) => ({ id: domain, name: domain }))}
+                        id={`setup-mailbox-${index + 1}-address`}
+                        invalid={Boolean(error.address)}
+                        required
+                        separator="@"
+                        size="sm"
                         value={mailbox.address}
-                        onChange={(event) => onUpdate(index, { address: event.target.value })}
+                        onValueChange={(address) => onUpdate(index, { address })}
                       />
                     </Field>
                   </TableCell>
-                  <TableCell className="p-1.5">
+                  <TableCell className="p-1">
                     <Field className="gap-1" data-invalid={Boolean(error.displayName)}>
                       {error.displayName ? <FieldError>{error.displayName}</FieldError> : null}
                       <Input
-                        aria-label={`Mailbox ${index + 1} display name`}
+                        aria-label={`Mailbox ${index + 1} sender name`}
                         aria-invalid={Boolean(error.displayName)}
-                        className="h-8 shadow-none"
+                        className="shadow-none"
                         placeholder="Support"
+                        size="sm"
                         value={mailbox.displayName}
                         onChange={(event) => onUpdate(index, { displayName: event.target.value })}
                       />
                     </Field>
                   </TableCell>
-                  <TableCell className="px-1 py-1.5 text-center">
-                    <Button
-                      aria-label={`Remove mailbox ${index + 1}`}
-                      className="size-8"
-                      disabled={mailboxes.length <= 1}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                      onClick={() => onRemove(index)}
-                    >
-                      <Trash2 aria-hidden="true" />
-                    </Button>
+                  <TableCell className="px-1 py-1 text-center">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          aria-label={`Actions for mailbox ${index + 1}`}
+                          disabled={mailboxes.length <= 1}
+                          size="icon"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <PiDotsThree aria-hidden="true" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuGroup>
+                          <DropdownMenuItem
+                            className="gap-2 text-destructive"
+                            onSelect={() => onRemove(index)}
+                          >
+                            <PiTrash aria-hidden="true" />
+                            Remove mailbox
+                          </DropdownMenuItem>
+                        </DropdownMenuGroup>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               );
@@ -244,28 +273,33 @@ export function MailboxStep({
       </div>
 
       <Button className="w-fit" size="sm" type="button" variant="outline" onClick={onAdd}>
-        <Plus data-icon="inline-start" />
+        <PiPlus data-icon="inline-start" />
         Add mailbox
       </Button>
 
+      <SetupCatchAllSettings
+        catchAllByDomain={catchAllByDomain}
+        domains={domains}
+        mailboxes={mailboxes}
+        onSetCatchAllMailbox={onSetCatchAllMailbox}
+        onSetCatchAllPolicy={onSetCatchAllPolicy}
+      />
+
       <Field className="max-w-md">
         <FieldLabel htmlFor="setup-default-from-mailbox">Default From mailbox</FieldLabel>
-        <Select value={defaultFromMailboxAddress} onValueChange={onSetDefaultFromMailboxAddress}>
-          <SelectTrigger id="setup-default-from-mailbox" className="w-full shadow-none">
-            <SelectValue placeholder="Choose a mailbox" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {mailboxes
-                .filter((mailbox) => mailbox.address)
-                .map((mailbox, index) => (
-                  <SelectItem key={`${index}:${mailbox.address}`} value={mailbox.address}>
-                    {mailbox.displayName || "Mailbox"} — {mailbox.address}
-                  </SelectItem>
-                ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+        <DropdownSelect
+          className="shadow-none"
+          id="setup-default-from-mailbox"
+          options={mailboxes
+            .filter((mailbox) => mailbox.address)
+            .map((mailbox) => ({
+              label: `${mailbox.displayName || "Mailbox"} — ${mailbox.address}`,
+              value: mailbox.address
+            }))}
+          placeholder="Choose a mailbox"
+          value={defaultFromMailboxAddress}
+          onValueChange={onSetDefaultFromMailboxAddress}
+        />
         <FieldDescription>
           New messages and forwards start from this mailbox. Replies use the mailbox that received
           the original message.
@@ -275,7 +309,7 @@ export function MailboxStep({
       {errors.form ? <FieldError>{errors.form}</FieldError> : null}
       {submitError ? (
         <Alert variant="destructive">
-          <CircleAlert />
+          <PiWarningCircle />
           <AlertTitle>Workspace was not created</AlertTitle>
           <AlertDescription>{submitError}</AlertDescription>
         </Alert>

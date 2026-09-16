@@ -13,7 +13,7 @@ const releaseWorkflow = readFileSync(
 
 describe("staging Mail API path", () => {
   it("uses the versioned API for candidate staging by default", () => {
-    expect(stagingMailApiPath("/mailboxes")).toBe("/api/v1/mailboxes");
+    expect(stagingMailApiPath("/mailboxes")).toBe("/api/v2/mailboxes");
   });
 
   it("supports the compatibility alias while bootstrapping the previous release", () => {
@@ -21,8 +21,8 @@ describe("staging Mail API path", () => {
   });
 
   it("rejects unsupported base paths and malformed route paths", () => {
-    expect(() => stagingMailApiPath("/mailboxes", "/api/v2")).toThrow(
-      "HQBASE_STAGING_MAIL_API_BASE_PATH must be /api or /api/v1."
+    expect(() => stagingMailApiPath("/mailboxes", "/api/v1")).toThrow(
+      "HQBASE_STAGING_MAIL_API_BASE_PATH must be /api or /api/v2."
     );
     expect(() => stagingMailApiPath("mailboxes")).toThrow(
       "Staging Mail API paths must start with /."
@@ -30,7 +30,7 @@ describe("staging Mail API path", () => {
   });
 
   it("uses the legacy alias only for the N-1 bootstrap workflow step", () => {
-    expect(lifecycleSpec).not.toContain('"/api/v1/mailboxes"');
+    expect(lifecycleSpec).not.toContain('"/api/v2/mailboxes"');
     const bootstrapStart = releaseWorkflow.indexOf(
       "      - name: Bootstrap persistent N-1 staging data"
     );
@@ -40,5 +40,40 @@ describe("staging Mail API path", () => {
     expect(bootstrapStart).toBeGreaterThan(-1);
     expect(bootstrapStep).toContain("HQBASE_STAGING_MAIL_API_BASE_PATH: /api");
     expect(bootstrapStep).toContain("run: pnpm test:e2e:staging:lifecycle");
+  });
+
+  it("skips candidate-only mailbox agent checks during N-1 bootstrap", () => {
+    const agentTestStart = lifecycleSpec.indexOf(
+      'test("a mailbox agent stays inside its assigned mailbox and revokes cleanly"'
+    );
+    const nextTest = lifecycleSpec.indexOf('\ntest("candidate mail experience', agentTestStart);
+    const agentTest = lifecycleSpec.slice(agentTestStart, nextTest);
+
+    expect(agentTestStart).toBeGreaterThan(-1);
+    expect(nextTest).toBeGreaterThan(agentTestStart);
+    expect(agentTest).toContain('HQBASE_STAGING_MAIL_API_BASE_PATH ?? "/api/v2"');
+    expect(agentTest).toContain('=== "/api"');
+    expect(agentTest.indexOf("test.skip(")).toBeLessThan(agentTest.indexOf("request.post("));
+  });
+
+  it("keeps catch-all expectations specific to the previous release schema", () => {
+    const experienceTestStart = lifecycleSpec.indexOf(
+      'test("candidate mail experience contracts work together"'
+    );
+    const experienceTest = lifecycleSpec.slice(experienceTestStart);
+
+    expect(experienceTestStart).toBeGreaterThan(-1);
+    expect(releaseWorkflow).toContain("PREVIOUS_TAG:");
+    expect(releaseWorkflow).toContain("needs.candidate.outputs.previous_tag");
+    expect(releaseWorkflow).toContain("HQBASE_STAGING_PREVIOUS_HAS_CATCH_ALL_POLICY=1");
+    expect(releaseWorkflow).toContain("HQBASE_STAGING_PREVIOUS_HAS_CATCH_ALL_POLICY=0");
+    expect(experienceTest).toContain("process.env.PREVIOUS_TAG");
+    expect(experienceTest).toContain(
+      'process.env.HQBASE_STAGING_PREVIOUS_HAS_CATCH_ALL_POLICY === "0"'
+    );
+    expect(experienceTest).toContain('{ catchAllMailboxId: null, catchAllPolicy: "unassigned" }');
+    expect(experienceTest).toContain(
+      '{ catchAllMailboxId: primaryMailbox.id, catchAllPolicy: "mailbox" }'
+    );
   });
 });

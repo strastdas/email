@@ -1,4 +1,6 @@
-export type MessageFolder = "inbox" | "sent" | "archived" | "trash" | "catchall";
+type MessageFolder = "inbox" | "sent" | "archived" | "trash" | "catchall";
+
+import type { MailLabel } from "@/features/labels/types";
 
 export type MessageSummary = {
   id: string;
@@ -7,6 +9,7 @@ export type MessageSummary = {
   direction: "inbound" | "outbound";
   folder: MessageFolder;
   fromAddress: string;
+  fromName?: string | null;
   to: string[];
   subject: string;
   snippet: string;
@@ -15,6 +18,7 @@ export type MessageSummary = {
   readAt: string | null;
   starredAt: string | null;
   hasAttachments: boolean;
+  labels?: MailLabel[];
   createdAt: string;
 };
 
@@ -30,9 +34,23 @@ export type ConversationPage = {
   totalCount: number | null;
 };
 
-export type ConversationAction = "read" | "unread" | "star" | "unstar" | "archive" | "trash";
+export type ConversationAction =
+  | "read"
+  | "unread"
+  | "star"
+  | "unstar"
+  | "archive"
+  | "unarchive"
+  | "trash"
+  | "restore";
+
+export type MessageFolderAction = Extract<
+  ConversationAction,
+  "archive" | "unarchive" | "trash" | "restore"
+>;
 
 export type MessageDetail = MessageSummary & {
+  replyTo?: string[];
   cc: string[];
   bcc: string[];
   deliveredToAddress: string | null;
@@ -47,12 +65,17 @@ export type MessageDetail = MessageSummary & {
     contentType: string;
     sizeBytes: number;
     contentId: string | null;
+    disposition: "attachment" | "inline";
   }>;
 };
 
 export type MessageHtml = {
+  afterQuotedHtml: string | null;
+  afterQuotedHtmlHasRemoteImages: boolean;
   hasRemoteImages: boolean;
   html: string;
+  htmlHasRemoteImages: boolean;
   quotedHtml: string | null;
+  quotedHtmlHasRemoteImages: boolean;
   remoteMediaTrusted: boolean;
 };

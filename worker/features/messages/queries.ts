@@ -1,7 +1,17 @@
-import { newId, nowIso } from "../../db/client";
+import { and, eq, type SQL, sql } from "drizzle-orm";
+
+import type { MessageScope } from "../../auth/mailbox-access";
+import { messageScopeCondition } from "../../auth/mailbox-access";
+import { nowIso } from "../../db/client";
+import { createDatabase, getRow, getRows } from "../../db/drizzle";
+import { messageAttachments, messages as messagesTable } from "../../db/schema";
 import { AppError } from "../../lib/errors";
 import type { MessageAction } from "./actions";
 import { buildMessageActionPatch } from "./actions";
+import { decodeKeysetCursor, encodeKeysetCursor, type KeysetCursor } from "./keyset-cursor";
+import { literalContains } from "./search";
+import { attachmentValues, messageValues } from "./storage";
+import { loadMessageText } from "./text-storage";
 import type {
   AttachmentRow,
   InsertAttachmentInput,
@@ -12,64 +22,44 @@ import type {
   StoredAttachment
 } from "./types";
 
-const messageSelect = `SELECT messages.*,
-  (SELECT address FROM mailbox_addresses
-   WHERE id = messages.delivered_to_address_id) AS delivered_to_address
-  FROM messages`;
+const messageSelect = sql`SELECT messages.* FROM messages`;
+
+/** Message cursors are versioned separately from conversation cursors. */
+const messageCursorVersion = "m1";
+export const defaultMessageLimit = 100;
+export const maxMessageLimit = 100;
 
 export type ListMessageFilters = {
+  cursor?: string | undefined;
   folder?: string | undefined;
+  labelId?: string | undefined;
+  labelIds?: readonly string[] | undefined;
   limit?: number | undefined;
   mailboxId?: string | undefined;
   search?: string | undefined;
-  mailboxIds?: string[] | undefined;
+  scope: MessageScope;
 };
+
+export type MessagePage = {
+  messages: MessageSummary[];
+  nextCursor: string | null;
+};
+
+function decodeMessageCursor(value: string): KeysetCursor {
+  const cursor = decodeKeysetCursor(messageCursorVersion, value);
+  if (!cursor) {
+    throw new AppError("INVALID_CURSOR", "Message cursor is invalid.", 400);
+  }
+  return cursor;
+}
 
 export async function insertMessage(
   db: D1Database,
   input: InsertMessageInput
 ): Promise<MessageSummary> {
-  const id = newId("msg");
-  const timestamp = nowIso();
-
-  await db
-    .prepare(
-      `INSERT INTO messages (
-        id, thread_id, mailbox_id, direction, folder, from_address, to_json, cc_json, bcc_json,
-        subject, snippet, text_body, html_r2_key, raw_r2_key, message_id, dedupe_key,
-        in_reply_to, references_json, received_at, sent_at, read_at, has_attachments,
-        created_at, updated_at, delivered_to_address_id, sent_from_address_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      id,
-      input.threadId,
-      input.mailboxId,
-      input.direction,
-      input.folder,
-      input.fromAddress,
-      JSON.stringify(input.to),
-      JSON.stringify(input.cc),
-      JSON.stringify(input.bcc),
-      input.subject,
-      input.snippet,
-      input.textBody,
-      input.htmlR2Key,
-      input.rawR2Key,
-      input.messageId,
-      input.dedupeKey,
-      input.inReplyTo,
-      JSON.stringify(input.references),
-      input.receivedAt,
-      input.sentAt,
-      input.readAt,
-      input.hasAttachments ? 1 : 0,
-      timestamp,
-      timestamp,
-      input.deliveredToAddressId ?? null,
-      input.sentFromAddressId ?? null
-    )
-    .run();
+  const values = messageValues(input);
+  const id = values.id;
+  await createDatabase(db).insert(messagesTable).values(values).run();
 
   const row = await getMessageRow(db, id);
   if (!row) {
@@ -82,114 +72,132 @@ export async function insertAttachment(
   db: D1Database,
   input: InsertAttachmentInput
 ): Promise<StoredAttachment> {
-  const id = newId("att");
-  const timestamp = nowIso();
-  await db
-    .prepare(
-      `INSERT INTO message_attachments
-       (id, message_id, filename, content_type, size_bytes, content_id, r2_key, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      id,
-      input.messageId,
-      input.filename,
-      input.contentType,
-      input.sizeBytes,
-      input.contentId,
-      input.r2Key,
-      timestamp
-    )
-    .run();
-
-  return {
-    id,
-    messageId: input.messageId,
-    filename: input.filename,
-    contentType: input.contentType,
-    sizeBytes: input.sizeBytes,
-    contentId: input.contentId,
-    r2Key: input.r2Key,
-    createdAt: timestamp
-  };
+  const values = attachmentValues(input);
+  await createDatabase(db).insert(messageAttachments).values(values).run();
+  return values;
 }
 
 export async function listMessages(
   db: D1Database,
   filters: ListMessageFilters
 ): Promise<MessageSummary[]> {
-  const where: string[] = [];
-  const params: Array<string | number> = [];
+  return (await listMessagePage(db, filters)).messages;
+}
 
-  if (filters.mailboxIds) {
-    if (filters.mailboxIds.length === 0) return [];
-    where.push(`mailbox_id IN (${filters.mailboxIds.map(() => "?").join(", ")})`);
-    params.push(...filters.mailboxIds);
-  }
+export async function listMessagePage(
+  db: D1Database,
+  filters: ListMessageFilters
+): Promise<MessagePage> {
+  const where: SQL[] = [];
+
+  // The access filter is applied first and is never relaxed by a cursor.
+  const scope = messageScopeCondition(filters.scope, "mailbox_id", "is_unassigned");
+  if (!scope) return { messages: [], nextCursor: null };
+  where.push(scope);
 
   if (filters.folder) {
-    where.push("folder = ?");
-    params.push(filters.folder);
+    where.push(sql`folder = ${filters.folder}`);
   }
   if (filters.mailboxId) {
-    where.push("mailbox_id = ?");
-    params.push(filters.mailboxId);
+    where.push(sql`mailbox_id = ${filters.mailboxId}`);
   }
   if (filters.search) {
     where.push(
-      "(subject LIKE ? OR from_address LIKE ? OR to_json LIKE ? OR snippet LIKE ? OR text_body LIKE ?)"
+      sql`(${literalContains(sql`subject`, filters.search)}
+           OR ${literalContains(sql`from_address`, filters.search)}
+           OR ${literalContains(sql`from_name`, filters.search)}
+           OR ${literalContains(sql`to_json`, filters.search)}
+           OR ${literalContains(sql`snippet`, filters.search)}
+           OR ${literalContains(sql`text_body`, filters.search)})`
     );
-    const like = `%${filters.search}%`;
-    params.push(like, like, like, like, like);
+  }
+  const labelIds = filters.labelIds ?? (filters.labelId ? [filters.labelId] : []);
+  for (const labelId of labelIds) {
+    where.push(sql`EXISTS (
+      SELECT 1 FROM message_labels assignment
+      WHERE assignment.message_id = messages.id AND assignment.label_id = ${labelId}
+    )`);
   }
 
-  const limit = Math.min(Math.max(filters.limit ?? 100, 1), 100);
-  const sql = `${messageSelect} ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-    ORDER BY COALESCE(received_at, sent_at, created_at) DESC LIMIT ?`;
-  params.push(limit);
+  const cursor = filters.cursor ? decodeMessageCursor(filters.cursor) : null;
+  if (cursor) {
+    where.push(
+      sql`(COALESCE(received_at, sent_at, created_at) < ${cursor.activityAt}
+           OR (COALESCE(received_at, sent_at, created_at) = ${cursor.activityAt}
+               AND messages.id < ${cursor.id}))`
+    );
+  }
 
-  const result = await db
-    .prepare(sql)
-    .bind(...params)
-    .all<MessageRow>();
+  const limit = Math.min(Math.max(filters.limit ?? defaultMessageLimit, 1), maxMessageLimit);
+  // Read one extra row to learn whether another page exists.
+  const result = await getRows<MessageRow>(
+    db,
+    sql`${messageSelect}
+        WHERE ${sql.join(where, sql` AND `)}
+        ORDER BY COALESCE(received_at, sent_at, created_at) DESC, messages.id DESC
+        LIMIT ${limit + 1}`
+  );
 
-  return result.results.map(mapMessageSummary);
+  const pageRows = result.slice(0, limit);
+  const finalRow = pageRows.at(-1);
+  return {
+    messages: pageRows.map(mapMessageSummary),
+    nextCursor:
+      result.length > limit && finalRow
+        ? encodeKeysetCursor(messageCursorVersion, {
+            activityAt: messageActivityOf(finalRow),
+            id: finalRow.id
+          })
+        : null
+  };
 }
 
-export async function getMessageDetail(db: D1Database, id: string): Promise<MessageDetail | null> {
+function messageActivityOf(row: MessageRow): string {
+  return row.received_at ?? row.sent_at ?? row.created_at;
+}
+
+export async function getMessageDetail(
+  db: D1Database,
+  id: string,
+  bucket?: R2Bucket
+): Promise<MessageDetail | null> {
   const row = await getMessageRow(db, id);
   if (!row) {
     return null;
   }
 
-  return mapMessageDetail(db, row);
+  return mapMessageDetail(db, row, bucket);
 }
 
 export async function listThreadMessages(
   db: D1Database,
   threadId: string,
-  mailboxIds: string[]
+  scope: MessageScope,
+  bucket?: R2Bucket
 ): Promise<MessageDetail[]> {
-  if (mailboxIds.length === 0) return [];
-  const result = await db
-    .prepare(
-      `${messageSelect}
-       WHERE thread_id = ? AND mailbox_id IN (${mailboxIds.map(() => "?").join(", ")})
-       ORDER BY COALESCE(received_at, sent_at, created_at) ASC
-       LIMIT 100`
-    )
-    .bind(threadId, ...mailboxIds)
-    .all<MessageRow>();
-  return Promise.all(result.results.map((row) => mapMessageDetail(db, row)));
+  const scopeCondition = messageScopeCondition(scope, "mailbox_id", "is_unassigned");
+  if (!scopeCondition) return [];
+  const rows = await getRows<MessageRow>(
+    db,
+    sql`${messageSelect}
+       WHERE thread_id = ${threadId} AND ${scopeCondition}
+       ORDER BY COALESCE(received_at, sent_at, created_at) ASC`
+  );
+  return Promise.all(rows.map((row) => mapMessageDetail(db, row, bucket)));
 }
 
-async function mapMessageDetail(db: D1Database, row: MessageRow): Promise<MessageDetail> {
+async function mapMessageDetail(
+  db: D1Database,
+  row: MessageRow,
+  bucket?: R2Bucket
+): Promise<MessageDetail> {
   return {
     ...mapMessageSummary(row),
     cc: parseJsonList(row.cc_json),
     bcc: parseJsonList(row.bcc_json),
     deliveredToAddress: row.delivered_to_address,
-    textBody: row.text_body,
+    replyTo: parseJsonList(row.reply_to_json ?? "[]"),
+    textBody: await loadMessageText(bucket, row.text_r2_key, row.text_body),
     htmlAvailable: row.html_r2_key !== null,
     messageId: row.message_id,
     inReplyTo: row.in_reply_to,
@@ -207,23 +215,34 @@ export async function updateMessageAction(
   if (!current) {
     throw new AppError("MESSAGE_NOT_FOUND", "Message not found.", 404);
   }
+  if (
+    (action === "unarchive" && current.folder !== "archived") ||
+    (action === "restore" && current.folder !== "trash")
+  ) {
+    return mapMessageSummary(current);
+  }
 
   const timestamp = nowIso();
-  const patch = buildMessageActionPatch(action, timestamp);
-  await db
-    .prepare(
-      `UPDATE messages
-       SET folder = ?, read_at = ?, starred_at = ?, archived_at = ?, trashed_at = ?, updated_at = ?
-       WHERE id = ?`
-    )
-    .bind(
-      patch.folder ?? current.folder,
-      patch.readAt === undefined ? current.read_at : patch.readAt,
-      patch.starredAt === undefined ? current.starred_at : patch.starredAt,
-      patch.archivedAt === undefined ? current.archived_at : patch.archivedAt,
-      patch.trashedAt === undefined ? current.trashed_at : patch.trashedAt,
-      timestamp,
-      id
+  const patch = buildMessageActionPatch(action, timestamp, {
+    direction: current.direction,
+    isUnassigned: current.is_unassigned === 1
+  });
+  const expectedFolder =
+    action === "unarchive" ? "archived" : action === "restore" ? "trash" : null;
+  await createDatabase(db)
+    .update(messagesTable)
+    .set({
+      folder: patch.folder,
+      readAt: patch.readAt,
+      starredAt: patch.starredAt,
+      archivedAt: patch.archivedAt,
+      trashedAt: patch.trashedAt,
+      updatedAt: timestamp
+    })
+    .where(
+      expectedFolder
+        ? and(eq(messagesTable.id, id), eq(messagesTable.folder, expectedFolder))
+        : eq(messagesTable.id, id)
     )
     .run();
 
@@ -235,52 +254,35 @@ export async function updateMessageAction(
 }
 
 export async function findAttachment(db: D1Database, id: string): Promise<StoredAttachment | null> {
-  const row = await db
-    .prepare("SELECT * FROM message_attachments WHERE id = ?")
-    .bind(id)
-    .first<AttachmentRow>();
+  const row = await getRow<AttachmentRow>(
+    db,
+    sql`SELECT * FROM message_attachments WHERE id = ${id}`
+  );
 
   return row ? mapAttachment(row) : null;
 }
 
 export async function getMessageHtmlKey(db: D1Database, id: string): Promise<string | null> {
-  const row = await db
-    .prepare("SELECT html_r2_key FROM messages WHERE id = ?")
-    .bind(id)
-    .first<{ html_r2_key: string | null }>();
+  const row = await getRow<{ html_r2_key: string | null }>(
+    db,
+    sql`SELECT html_r2_key FROM messages WHERE id = ${id}`
+  );
   return row?.html_r2_key ?? null;
 }
 
-export async function getMessageMailboxId(db: D1Database, id: string): Promise<string | null> {
-  const row = await db
-    .prepare("SELECT mailbox_id FROM messages WHERE id = ?")
-    .bind(id)
-    .first<{ mailbox_id: string | null }>();
-  return row?.mailbox_id ?? null;
-}
-
-export async function getAttachmentMailboxId(db: D1Database, id: string): Promise<string | null> {
-  const row = await db
-    .prepare(
-      `SELECT m.mailbox_id FROM message_attachments a
-       JOIN messages m ON m.id = a.message_id WHERE a.id = ?`
-    )
-    .bind(id)
-    .first<{ mailbox_id: string | null }>();
-  return row?.mailbox_id ?? null;
-}
-
 async function getMessageRow(db: D1Database, id: string): Promise<MessageRow | null> {
-  return db.prepare(`${messageSelect} WHERE messages.id = ?`).bind(id).first<MessageRow>();
+  return getRow<MessageRow>(db, sql`${messageSelect} WHERE messages.id = ${id}`);
 }
 
 async function listAttachments(db: D1Database, messageId: string): Promise<StoredAttachment[]> {
-  const result = await db
-    .prepare("SELECT * FROM message_attachments WHERE message_id = ? ORDER BY filename ASC")
-    .bind(messageId)
-    .all<AttachmentRow>();
+  const rows = await getRows<AttachmentRow>(
+    db,
+    sql`SELECT * FROM message_attachments
+        WHERE message_id = ${messageId}
+        ORDER BY filename ASC`
+  );
 
-  return result.results.map(mapAttachment);
+  return rows.map(mapAttachment);
 }
 
 export function mapMessageSummary(row: MessageRow): MessageSummary {
@@ -291,6 +293,7 @@ export function mapMessageSummary(row: MessageRow): MessageSummary {
     direction: row.direction,
     folder: row.folder,
     fromAddress: row.from_address,
+    fromName: row.from_name,
     to: parseJsonList(row.to_json),
     subject: row.subject,
     snippet: row.snippet,
@@ -311,6 +314,7 @@ function mapAttachment(row: AttachmentRow): StoredAttachment {
     contentType: row.content_type,
     sizeBytes: row.size_bytes,
     contentId: row.content_id,
+    disposition: row.disposition,
     r2Key: row.r2_key,
     createdAt: row.created_at
   };

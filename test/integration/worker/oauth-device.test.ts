@@ -1,19 +1,32 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createAuth } from "../../../worker/auth/auth";
 import { deviceCodeGrantType } from "../../../worker/auth/device-authorization";
 import { applyCurrentMigrations } from "./current-migrations";
 
 const origin = "https://hqbase.test";
-const apiResource = `${origin}/api/v1`;
+const apiResource = `${origin}/api/v2`;
 
 let clientId = "";
 let ownerCookie = "";
 let ownerSessionId = "";
 let otherCookie = "";
 
+type OAuthTokenResponse = {
+  access_token: string;
+  expires_at: number;
+  expires_in: number;
+  refresh_token: string;
+  scope: string;
+  token_type: string;
+};
+
 describe("OAuth Device Authorization Grant", () => {
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM rate_limits WHERE scope = 'oauth.device.verify.ip'").run();
+  });
+
   beforeAll(async () => {
     await applyCurrentMigrations();
 
@@ -103,11 +116,7 @@ describe("OAuth Device Authorization Grant", () => {
       .run();
     const tokenResponse = await pollToken(authorization.device_code);
     expect(tokenResponse.status, await tokenResponse.clone().text()).toBe(200);
-    const token = (await tokenResponse.json()) as {
-      access_token?: string;
-      refresh_token?: string;
-      scope?: string;
-    };
+    const token = (await tokenResponse.json()) as OAuthTokenResponse;
     expect(token.access_token).toMatch(/^hqb_access_/);
     expect(token.refresh_token).toMatch(/^hqb_refresh_/);
     expect(token.scope?.split(" ")).toEqual(
@@ -132,21 +141,189 @@ describe("OAuth Device Authorization Grant", () => {
       consentCount: 1
     });
 
-    const api = await SELF.fetch(`${origin}/api/v1/mailboxes`, {
+    const api = await SELF.fetch(`${origin}/api/v2/mailboxes`, {
       headers: { authorization: `Bearer ${token.access_token}` }
     });
     expect(api.status, await api.clone().text()).toBe(200);
     await expect(api.json()).resolves.toEqual([]);
+
+    if (!token.refresh_token) throw new Error("Refresh token was not issued.");
+    const rotatedResponse = await refreshToken(token.refresh_token);
+    expect(rotatedResponse.status, await rotatedResponse.clone().text()).toBe(200);
+    const rotated = (await rotatedResponse.json()) as OAuthTokenResponse;
+    expect(rotated.access_token).toMatch(/^hqb_access_/);
+    expect(rotated.refresh_token).toMatch(/^hqb_refresh_/);
+
+    const concurrentReplay = await refreshToken(token.refresh_token);
+    expect(concurrentReplay.status, await concurrentReplay.clone().text()).toBe(200);
+    const replayed = (await concurrentReplay.json()) as OAuthTokenResponse;
+    const { expires_in: rotatedExpiresIn, ...rotatedStable } = rotated;
+    const { expires_in: replayedExpiresIn, ...replayedStable } = replayed;
+    expect(replayedStable).toEqual(rotatedStable);
+    expect(replayedExpiresIn).toBeGreaterThan(0);
+    expect(replayedExpiresIn).toBeLessThanOrEqual(rotatedExpiresIn);
+
+    await env.DB.prepare(
+      `UPDATE oauthRefreshToken
+       SET rotationReplayExpiresAt = ?
+       WHERE sessionId = ? AND rotatedAt IS NOT NULL`
+    )
+      .bind("2000-01-01T00:00:00.000Z", ownerSessionId)
+      .run();
+    const lateReplay = await refreshToken(token.refresh_token);
+    expect(lateReplay.status).toBe(400);
+    await expect(lateReplay.json()).resolves.toMatchObject({ error: "invalid_grant" });
+    if (!rotated.refresh_token) throw new Error("Rotated refresh token was not issued.");
+    const invalidatedFamily = await refreshToken(rotated.refresh_token);
+    expect(invalidatedFamily.status).toBe(400);
+    await expect(invalidatedFamily.json()).resolves.toMatchObject({ error: "invalid_grant" });
 
     const replay = await pollToken(authorization.device_code);
     expect(replay.status).toBe(400);
     await expect(replay.json()).resolves.toMatchObject({ error: "invalid_grant" });
 
     await env.DB.prepare('DELETE FROM "session" WHERE id = ?').bind(ownerSessionId).run();
-    const afterSessionEnd = await SELF.fetch(`${origin}/api/v1/mailboxes`, {
+    const afterSessionEnd = await SELF.fetch(`${origin}/api/v2/mailboxes`, {
       headers: { authorization: `Bearer ${token.access_token}` }
     });
     expect(afterSessionEnd.status).toBe(401);
+  });
+
+  it.each([
+    "expired",
+    "signed-out"
+  ])("refreshes offline access after the browser session is %s", async (state) => {
+    const person = await signUp(`offline-${state}@login.example`, "Offline Person");
+    const authorization = await requestDeviceCode("mail:read offline_access");
+    await verifyCode(authorization.user_code, person.cookie);
+    expect((await approveCode(authorization.user_code, person.cookie)).status).toBe(200);
+    const issued = await pollToken(authorization.device_code);
+    expect(issued.status).toBe(200);
+    const token = await issued.json<OAuthTokenResponse>();
+    if (state === "expired") {
+      await env.DB.prepare('UPDATE "session" SET expiresAt = ? WHERE id = ?')
+        .bind("2000-01-01T00:00:00.000Z", person.sessionId)
+        .run();
+      const stillActive = await SELF.fetch(`${origin}/api/v2/mailboxes`, {
+        headers: { authorization: `Bearer ${token.access_token}` }
+      });
+      expect(stillActive.status).toBe(200);
+    } else {
+      const signOut = await SELF.fetch(`${origin}/api/auth/sign-out`, {
+        method: "POST",
+        headers: { cookie: person.cookie, origin }
+      });
+      expect(signOut.status).toBe(200);
+    }
+    const refreshed = await refreshToken(token.refresh_token);
+    expect(refreshed.status).toBe(200);
+    const next = await refreshed.json<OAuthTokenResponse>();
+    const api = () =>
+      SELF.fetch(`${origin}/api/v2/mailboxes`, {
+        headers: { authorization: `Bearer ${next.access_token}` }
+      });
+    expect((await api()).status).toBe(200);
+    const session = await env.DB.prepare('SELECT expiresAt FROM "session" WHERE id = ?')
+      .bind(person.sessionId)
+      .first<{ expiresAt: string }>();
+    expect(session?.expiresAt ?? null).toBe(
+      state === "expired" ? "2000-01-01T00:00:00.000Z" : null
+    );
+    // Losing offline consent must restore the session requirement immediately.
+    const tokenOwner = await env.DB.prepare('SELECT id FROM "user" WHERE email = ?')
+      .bind(`offline-${state}@login.example`)
+      .first<{ id: string }>();
+    if (!tokenOwner) throw new Error("Expected offline test user.");
+    await env.DB.prepare("UPDATE oauthConsent SET scopes = ? WHERE userId = ?")
+      .bind('["mail:read"]', tokenOwner.id)
+      .run();
+    expect((await api()).status).toBe(401);
+    await env.DB.prepare("UPDATE oauthConsent SET scopes = ? WHERE userId = ?")
+      .bind('["mail:read","offline_access"]', tokenOwner.id)
+      .run();
+    expect((await api()).status).toBe(200);
+    await env.DB.prepare('UPDATE "user" SET banned = 1 WHERE id = ?').bind(tokenOwner.id).run();
+    expect((await api()).status).toBe(401);
+    await env.DB.prepare('UPDATE "user" SET banned = 0 WHERE id = ?').bind(tokenOwner.id).run();
+    // Revoke through the connected-app route using a new browser login.
+    const signIn = await SELF.fetch(`${origin}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({
+        email: `offline-${state}@login.example`,
+        password: "device-test-password"
+      })
+    });
+    expect(signIn.status).toBe(200);
+    const revoke = await SELF.fetch(`${origin}/api/oauth-connections/${clientId}`, {
+      method: "DELETE",
+      headers: { cookie: extractSessionCookie(signIn), origin }
+    });
+    expect(revoke.status).toBe(204);
+    expect((await api()).status).toBe(401);
+    expect((await refreshToken(next.refresh_token)).status).toBe(400);
+  });
+
+  it("revokes offline access and refresh tokens on password reset", async () => {
+    const email = "offline-reset@login.example";
+    const person = await signUp(email, "Reset Person");
+    const authorization = await requestDeviceCode("mail:read offline_access");
+    await verifyCode(authorization.user_code, person.cookie);
+    expect((await approveCode(authorization.user_code, person.cookie)).status).toBe(200);
+    const issued = await pollToken(authorization.device_code);
+    expect(issued.status).toBe(200);
+    const token = await issued.json<OAuthTokenResponse>();
+    const user = await env.DB.prepare('SELECT id FROM "user" WHERE email = ?')
+      .bind(email)
+      .first<{ id: string }>();
+    if (!user) throw new Error("Expected reset test user.");
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      "INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+      .bind(
+        "offline_reset_verification",
+        "reset-password:offline-reset-test",
+        user.id,
+        new Date(Date.now() + 3600000).toISOString(),
+        now,
+        now
+      )
+      .run();
+    const reset = await SELF.fetch(`${origin}/api/auth/reset-password`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ token: "offline-reset-test", newPassword: "new-device-test-password" })
+    });
+    expect(reset.status).toBe(200);
+    const api = await SELF.fetch(`${origin}/api/v2/mailboxes`, {
+      headers: { authorization: `Bearer ${token.access_token}` }
+    });
+    expect(api.status).toBe(401);
+    expect((await refreshToken(token.refresh_token)).status).toBe(400);
+    for (const table of ["oauthAccessToken", "oauthRefreshToken", "oauthConsent"]) {
+      const count = await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE userId = ?`)
+        .bind(user.id)
+        .first<{ count: number }>();
+      expect(count?.count).toBe(0);
+    }
+  });
+
+  it("requires an active session without offline access", async () => {
+    const person = await signUp("online-only@login.example", "Online Person");
+    const authorization = await requestDeviceCode("mail:read");
+    await verifyCode(authorization.user_code, person.cookie);
+    expect((await approveCode(authorization.user_code, person.cookie)).status).toBe(200);
+    const issued = await pollToken(authorization.device_code);
+    expect(issued.status).toBe(200);
+    const token = await issued.json<OAuthTokenResponse>();
+    await env.DB.prepare('UPDATE "session" SET expiresAt = ? WHERE id = ?')
+      .bind("2000-01-01T00:00:00.000Z", person.sessionId)
+      .run();
+    const response = await SELF.fetch(`${origin}/api/v2/mailboxes`, {
+      headers: { authorization: `Bearer ${token.access_token}` }
+    });
+    expect(response.status).toBe(401);
   });
 
   it("enforces the polling interval and returns a terminal denial", async () => {
@@ -273,6 +450,19 @@ function pollToken(deviceCode: string): Promise<Response> {
       client_id: clientId,
       device_code: deviceCode,
       grant_type: deviceCodeGrantType,
+      resource: apiResource
+    }),
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    method: "POST"
+  });
+}
+
+function refreshToken(token: string): Promise<Response> {
+  return SELF.fetch(`${origin}/api/auth/oauth2/token`, {
+    body: new URLSearchParams({
+      client_id: clientId,
+      grant_type: "refresh_token",
+      refresh_token: token,
       resource: apiResource
     }),
     headers: { "content-type": "application/x-www-form-urlencoded" },

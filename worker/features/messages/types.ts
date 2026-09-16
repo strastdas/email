@@ -1,5 +1,5 @@
-export const messageFolders = ["inbox", "sent", "drafts", "archived", "trash", "catchall"] as const;
-export const messageDirections = ["inbound", "outbound"] as const;
+const messageFolders = ["inbox", "sent", "drafts", "archived", "trash", "catchall"] as const;
+const messageDirections = ["inbound", "outbound"] as const;
 export const conversationFolders = [
   "inbox",
   "sent",
@@ -20,6 +20,7 @@ export type StoredAttachment = {
   contentType: string;
   sizeBytes: number;
   contentId: string | null;
+  disposition: "attachment" | "inline";
   r2Key: string;
   createdAt: string;
 };
@@ -31,6 +32,7 @@ export type MessageSummary = {
   direction: MessageDirection;
   folder: MessageFolder;
   fromAddress: string;
+  fromName: string | null;
   to: string[];
   subject: string;
   snippet: string;
@@ -43,6 +45,7 @@ export type MessageSummary = {
 };
 
 export type MessageDetail = MessageSummary & {
+  replyTo?: string[];
   cc: string[];
   bcc: string[];
   deliveredToAddress: string | null;
@@ -70,15 +73,19 @@ export type MessageRow = {
   id: string;
   thread_id: string;
   mailbox_id: string | null;
+  is_unassigned: number;
   direction: MessageDirection;
   folder: MessageFolder;
   from_address: string;
+  from_name: string | null;
   to_json: string;
   cc_json: string;
   bcc_json: string;
   subject: string;
   snippet: string;
   text_body: string;
+  text_r2_key?: string | null;
+  reply_to_json?: string;
   html_r2_key: string | null;
   raw_r2_key: string | null;
   message_id: string | null;
@@ -113,16 +120,21 @@ export type AttachmentRow = {
   content_type: string;
   size_bytes: number;
   content_id: string | null;
+  disposition: "attachment" | "inline";
   r2_key: string;
   created_at: string;
 };
 
 export type InsertMessageInput = {
+  textR2Key?: string | null;
+  replyTo?: string[];
   threadId: string;
   mailboxId: string | null;
+  isUnassigned: boolean;
   direction: MessageDirection;
   folder: MessageFolder;
   fromAddress: string;
+  fromName: string | null;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -139,8 +151,7 @@ export type InsertMessageInput = {
   sentAt: string | null;
   readAt: string | null;
   hasAttachments: boolean;
-  deliveredToAddressId?: string | null | undefined;
-  sentFromAddressId?: string | null | undefined;
+  deliveredToAddress?: string | null | undefined;
 };
 
 export type InsertAttachmentInput = {
@@ -149,5 +160,6 @@ export type InsertAttachmentInput = {
   contentType: string;
   sizeBytes: number;
   contentId: string | null;
+  disposition: "attachment" | "inline";
   r2Key: string;
 };

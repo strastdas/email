@@ -2,12 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   handleInboundEmail: vi.fn(),
-  notifyInboundMessage: vi.fn()
+  notifyInboundMessage: vi.fn(),
+  publishMessageMailEvent: vi.fn()
 }));
 
 vi.mock("@worker/email/inbound", () => ({ handleInboundEmail: mocks.handleInboundEmail }));
 vi.mock("@worker/features/notifications/delivery", () => ({
   notifyInboundMessage: mocks.notifyInboundMessage
+}));
+vi.mock("@worker/features/events/service", () => ({
+  ignoreMailEventFailure: (promise: Promise<void>) => promise.catch(() => undefined),
+  publishMessageMailEvent: mocks.publishMessageMailEvent
 }));
 
 import worker from "@worker/index";
@@ -23,6 +28,7 @@ describe("inbound notification scheduling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.notifyInboundMessage.mockResolvedValue(undefined);
+    mocks.publishMessageMailEvent.mockResolvedValue(undefined);
   });
 
   it("does not schedule push for a duplicate inbound message", async () => {
@@ -39,8 +45,8 @@ describe("inbound notification scheduling", () => {
     expect(waitUntil).not.toHaveBeenCalled();
   });
 
-  it("schedules push after a newly stored inbound message", async () => {
-    mocks.handleInboundEmail.mockResolvedValue({ inserted: true, message: storedMessage });
+  it("does not schedule events after the recipient is rejected", async () => {
+    mocks.handleInboundEmail.mockResolvedValue(null);
     const waitUntil = vi.fn();
 
     await worker.email(
@@ -49,8 +55,32 @@ describe("inbound notification scheduling", () => {
       { waitUntil } as unknown as ExecutionContext
     );
 
-    expect(mocks.notifyInboundMessage).toHaveBeenCalledWith({}, storedMessage);
-    expect(waitUntil).toHaveBeenCalledOnce();
-    await expect(waitUntil.mock.calls[0]?.[0]).resolves.toBeUndefined();
+    expect(mocks.notifyInboundMessage).not.toHaveBeenCalled();
+    expect(mocks.publishMessageMailEvent).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("schedules push after a newly stored inbound message", async () => {
+    mocks.handleInboundEmail.mockResolvedValue({
+      inserted: true,
+      isUnassigned: true,
+      message: storedMessage
+    });
+    const waitUntil = vi.fn();
+
+    await worker.email(
+      {} as ForwardableEmailMessage,
+      {} as WorkerEnv,
+      { waitUntil } as unknown as ExecutionContext
+    );
+
+    expect(mocks.notifyInboundMessage).toHaveBeenCalledWith({}, storedMessage, true);
+    expect(mocks.publishMessageMailEvent).toHaveBeenCalledWith({}, [
+      { isUnassigned: true, mailboxId: "mbx_1" }
+    ]);
+    expect(waitUntil).toHaveBeenCalledTimes(2);
+    await Promise.all(
+      waitUntil.mock.calls.map(([promise]) => expect(promise).resolves.toBeUndefined())
+    );
   });
 });

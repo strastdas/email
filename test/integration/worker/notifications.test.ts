@@ -2,6 +2,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { createAuth } from "../../../worker/auth/auth";
+import { messageEventUserIds } from "../../../worker/features/events/service";
 import {
   countUnreadMessages,
   listPushSubscriptionsForMailbox,
@@ -25,14 +26,20 @@ describe("notification persistence", () => {
            ('usr_banned', 'Banned', 'banned@login.example', 1, ?, ?, 'owner', 1)`
       ).bind(now, now, now, now, now, now, now, now),
       env.DB.prepare(
-        `INSERT INTO mailboxes (id, address, display_name, is_active, created_at, updated_at)
+        `INSERT INTO mail_domains
+         (id, name, receiving_status, sending_status, dns_status, is_enabled, created_at, updated_at)
+         VALUES ('dom_notifications', 'example.com', 'ready', 'ready', 'ready', 1, ?, ?)`
+      ).bind(now, now),
+      env.DB.prepare(
+        `INSERT INTO mailboxes
+         (id, address, mail_domain_id, display_name, is_active, created_at, updated_at)
          VALUES
-           ('mbx_one', 'support@example.com', 'Support', 1, ?, ?),
-           ('mbx_two', 'privacy@example.com', 'Privacy', 1, ?, ?)`
+           ('mbx_one', 'support@example.com', 'dom_notifications', 'Support', 1, ?, ?),
+           ('mbx_two', 'privacy@example.com', 'dom_notifications', 'Privacy', 1, ?, ?)`
       ).bind(now, now, now, now),
       env.DB.prepare(
         `INSERT INTO mailbox_grants
-         (mailbox_id, user_id, access_level, created_by, created_at, updated_at)
+         (mailbox_id, principal_id, access_level, created_by_principal_id, created_at, updated_at)
          VALUES ('mbx_one', 'usr_member', 'read', 'usr_owner', ?, ?)`
       ).bind(now, now),
       env.DB.prepare(
@@ -42,7 +49,8 @@ describe("notification persistence", () => {
       ).bind(now, now, now)
     ]);
     await insertMessage("msg_inbox", "mbx_one", "inbox", null);
-    await insertMessage("msg_catchall", "mbx_one", "catchall", null);
+    // Unassigned catch-all messages have an explicit marker and no mailbox.
+    await insertMessage("msg_catchall", null, "catchall", null);
     await insertMessage("msg_read", "mbx_one", "inbox", now);
     await insertMessage("msg_z_other", "mbx_two", "inbox", null);
 
@@ -57,23 +65,66 @@ describe("notification persistence", () => {
   });
 
   it("counts only accessible unread attention folders", async () => {
-    await expect(countUnreadMessages(env.DB, ["mbx_one"])).resolves.toEqual({
+    await expect(
+      countUnreadMessages(env.DB, { includeUnassigned: false, mailboxIds: ["mbx_one"] })
+    ).resolves.toEqual({
+      catchall: 0,
+      inbox: 1,
+      inboxByMailbox: { mbx_one: 1 },
+      total: 1
+    });
+    await expect(
+      countUnreadMessages(env.DB, {
+        includeUnassigned: false,
+        mailboxIds: ["mbx_one", "mbx_two"]
+      })
+    ).resolves.toEqual({
+      catchall: 0,
+      inbox: 2,
+      inboxByMailbox: { mbx_one: 1, mbx_two: 1 },
+      total: 2
+    });
+  });
+
+  it("counts catch-all messages only for scopes that include them", async () => {
+    await expect(
+      countUnreadMessages(env.DB, { includeUnassigned: true, mailboxIds: ["mbx_one"] })
+    ).resolves.toEqual({
       catchall: 1,
       inbox: 1,
       inboxByMailbox: { mbx_one: 1 },
       total: 2
     });
-    await expect(countUnreadMessages(env.DB, ["mbx_one", "mbx_two"])).resolves.toEqual({
+    // An owner with no mailboxes at all still sees catch-all mail.
+    await expect(
+      countUnreadMessages(env.DB, { includeUnassigned: true, mailboxIds: [] })
+    ).resolves.toEqual({
       catchall: 1,
-      inbox: 2,
-      inboxByMailbox: { mbx_one: 1, mbx_two: 1 },
-      total: 3
+      inbox: 0,
+      inboxByMailbox: {},
+      total: 1
     });
   });
 
   it("targets owners and live mailbox grants but not unrelated or banned users", async () => {
     const subscriptions = await listPushSubscriptionsForMailbox(env.DB, "mbx_one");
     expect(subscriptions.map((row) => row.user_id).sort()).toEqual(["usr_member", "usr_owner"]);
+  });
+
+  it("does not wake a principal whose only matching mailbox was deleted", async () => {
+    await env.DB.prepare("UPDATE mailboxes SET deleted_at = ? WHERE id = 'mbx_one'")
+      .bind("2026-08-23T16:00:00.000Z")
+      .run();
+    try {
+      await expect(
+        messageEventUserIds(env.DB, [
+          { isUnassigned: false, mailboxId: "mbx_one" },
+          { isUnassigned: false, mailboxId: "mbx_two" }
+        ])
+      ).resolves.toEqual(["usr_owner"]);
+    } finally {
+      await env.DB.prepare("UPDATE mailboxes SET deleted_at = NULL WHERE id = 'mbx_one'").run();
+    }
   });
 
   it("moves an endpoint to the current signed-in user and scopes removal by ownership", async () => {
@@ -118,7 +169,7 @@ describe("notification persistence", () => {
     expect(user).not.toBeNull();
     await env.DB.prepare(
       `INSERT INTO mailbox_grants
-       (mailbox_id, user_id, access_level, created_by, created_at, updated_at)
+       (mailbox_id, principal_id, access_level, created_by_principal_id, created_at, updated_at)
        VALUES ('mbx_one', ?, 'read', 'usr_owner', ?, ?)`
     )
       .bind(user?.id, "2026-07-29T12:00:00.000Z", "2026-07-29T12:00:00.000Z")
@@ -132,7 +183,7 @@ describe("notification persistence", () => {
     expect(status.status, await status.clone().text()).toBe(200);
     expect(await status.json()).toEqual({
       latestInboundMessageId: "msg_read",
-      unread: { catchall: 1, inbox: 1, inboxByMailbox: { mbx_one: 1 }, total: 2 },
+      unread: { catchall: 0, inbox: 1, inboxByMailbox: { mbx_one: 1 }, total: 1 },
       vapidPublicKey: "integration-vapid-public-key"
     });
 
@@ -178,20 +229,21 @@ function subscription(endpoint: string) {
 
 async function insertMessage(
   id: string,
-  mailboxId: string,
+  mailboxId: string | null,
   folder: "catchall" | "inbox",
   readAt: string | null
 ): Promise<void> {
   const now = "2026-07-29T12:00:00.000Z";
   await env.DB.prepare(
     `INSERT INTO messages (
-       id, thread_id, mailbox_id, direction, folder, from_address, to_json, cc_json, bcc_json,
+       id, thread_id, mailbox_id, is_unassigned, direction, folder,
+       from_address, to_json, cc_json, bcc_json,
        subject, snippet, text_body, references_json, received_at, read_at, has_attachments,
        created_at, updated_at
-     ) VALUES (?, 'thr_push', ?, 'inbound', ?, 'sender@example.com', '[]', '[]', '[]',
+     ) VALUES (?, 'thr_push', ?, ?, 'inbound', ?, 'sender@example.com', '[]', '[]', '[]',
        'Subject', 'Snippet', 'Body', '[]', ?, ?, 0, ?, ?)`
   )
-    .bind(id, mailboxId, folder, now, readAt, now, now)
+    .bind(id, mailboxId, folder === "catchall" ? 1 : 0, folder, now, readAt, now, now)
     .run();
 }
 

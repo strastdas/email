@@ -35,15 +35,22 @@
   <a href="https://discord.gg/U67PB663nf">
     <img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&amp;logoColor=white" alt="Join the HQBase Discord">
   </a>
+  <a href="https://x.com/berman_to">
+    <img src="https://img.shields.io/badge/X-Follow-000000?logo=x&amp;logoColor=white" alt="Follow @berman_to on X">
+  </a>
 </p>
 
 <p align="center">
-  <a href="https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2FHQBase%2Fhqbase">
+  <a href="https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2FHQBase%2Fhqbase%2Ftree%2Fdeploy">
     <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare">
   </a>
 </p>
 
 ## About HQBase
+
+<p align="center">
+  <img src="public/hqbase-desktop-screenshot.png" alt="HQBase shared inbox interface">
+</p>
 
 HQBase gives teams one place to work with shared mailboxes while keeping the application, mail,
 and Cloudflare credentials in customer infrastructure. It includes:
@@ -55,6 +62,17 @@ and Cloudflare credentials in customer infrastructure. It includes:
 
 See the [product documentation](https://hqbase.io/docs/) for installation, daily use, architecture,
 and operations.
+
+## Made by the community
+
+We love seeing people build around HQBase. Independent clients give you more ways to use your
+workspace:
+
+- [Herald](https://github.com/awizemann/herald) — A native macOS email client for HQBase.
+
+HQBase has tested Herald for compatibility. It is made and maintained by independent community
+developers, so its releases, support, and behavior remain in their care rather than HQBase's.
+Please review the project and decide whether it is right for your workspace.
 
 ## Develop locally
 
@@ -73,9 +91,11 @@ Before you run the optional seed command, add these values to `.dev.vars`:
 - `HQBASE_LOCAL_SEED_PASSWORD` with 8 to 128 characters
 
 The seed command writes only to local D1 and does not contact Cloudflare OAuth. Open
-`http://localhost:8787/` and sign in as `owner@hqbase.test` with the seed password.
+`http://127.0.0.1:5173/` and sign in as `owner@hqbase.test` with that
+password. Vite serves the frontend with live reload on port 5173 and proxies API requests to the
+Wrangler Worker on port 8787.
 
-To use the first-run setup flow, omit the seed command and open `http://localhost:8787/setup`.
+To use the first-run setup flow, omit the seed command and open `http://localhost:5173/setup`.
 
 ### Reset local data
 
@@ -97,6 +117,17 @@ pnpm dev:setup-ui
 ```
 
 Open `http://127.0.0.1:5173/__ui/setup`.
+
+### Review the visual system
+
+To inspect the shared components, interactive states, product patterns, and local screen routes:
+
+```sh
+pnpm dev:ui
+```
+
+Open `http://127.0.0.1:5173/__ui/design`. The gallery uses deterministic presentation fixtures
+and does not call product APIs.
 
 ## Verify changes
 

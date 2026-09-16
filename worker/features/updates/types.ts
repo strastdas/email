@@ -1,13 +1,15 @@
 export type ReleaseManifest = {
   format: "hqbase-release-v1";
   product: "hqbase";
-  channel: "stable";
+  channel: "stable" | "nightly";
   version: string;
   schemaVersion: number;
   minVersion: string;
   publishedAt: string;
+  notes: string[];
   notesUrl: string;
   artifact: { url: string; sha256: string; size: number };
+  updater: { protocol: 2; sourceUrl: string; sha256: string; size: number };
   keyId: string;
 };
 
@@ -15,9 +17,11 @@ export type UpdateStatus = {
   product: "hqbase";
   installedVersion: string;
   installedSchemaVersion: number;
-  channel: "stable";
+  channel: "stable" | "nightly";
+  waitingForStable?: boolean;
   checkedAt: string;
   available: boolean;
   compatible: boolean;
+  repairRequired: boolean;
   release: ReleaseManifest;
 };

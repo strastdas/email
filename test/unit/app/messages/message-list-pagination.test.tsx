@@ -67,6 +67,7 @@ describe("conversation list pagination", () => {
         onLoadMore={onLoadMore}
         onRefresh={() => undefined}
         onSelect={() => undefined}
+        onToggleStar={() => undefined}
       />
     );
     await Promise.resolve();
@@ -91,10 +92,12 @@ describe("conversation list pagination", () => {
         onLoadMore={() => undefined}
         onRefresh={onRefresh}
         onSelect={() => undefined}
+        onToggleStar={() => undefined}
       />
     );
     const scrollContainer = rendered.container.querySelector<HTMLDivElement>(".overscroll-contain");
     expect(scrollContainer).not.toBeNull();
+    expect(scrollContainer?.className).toContain("[scrollbar-gutter:stable]");
 
     await flushHookEffects(() => {
       scrollContainer?.dispatchEvent(touchEvent("touchstart", 20, 100));
@@ -133,6 +136,7 @@ describe("conversation list pagination", () => {
         onLoadMore={() => undefined}
         onRefresh={() => undefined}
         onSelect={() => undefined}
+        onToggleStar={() => undefined}
       />
     );
     const scrollContainer = rendered.container.querySelector<HTMLDivElement>(".overscroll-contain");
@@ -166,6 +170,7 @@ describe("conversation list pagination", () => {
         onLoadMore={() => undefined}
         onRefresh={onRefresh}
         onSelect={() => undefined}
+        onToggleStar={() => undefined}
       />
     );
     const scrollContainer = rendered.container.querySelector<HTMLDivElement>(".overscroll-contain");
@@ -198,6 +203,7 @@ describe("conversation list pagination", () => {
             onLoadMore={() => undefined}
             onRefresh={() => setRefreshCount((count) => count + 1)}
             onSelect={() => undefined}
+            onToggleStar={() => undefined}
           />
         </div>
       );
@@ -241,6 +247,7 @@ describe("conversation list pagination", () => {
         onLoadMore={() => undefined}
         onRefresh={() => undefined}
         onSelect={() => undefined}
+        onToggleStar={() => undefined}
       />
     );
     const scrollContainer = rendered.container.querySelector<HTMLDivElement>(".overscroll-contain");

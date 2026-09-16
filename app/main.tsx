@@ -8,6 +8,10 @@ import { ThemeProvider } from "./features/theme/theme-provider";
 import "./styles.css";
 
 async function loadRootComponent(): Promise<React.ComponentType> {
+  if (import.meta.env.DEV && window.location.pathname === "/__ui/design") {
+    return (await import("./features/ui-lab/design-preview")).DesignPreview;
+  }
+
   if (import.meta.env.DEV && window.location.pathname === "/__ui/setup") {
     return (await import("./features/setup/setup-preview")).SetupPreview;
   }

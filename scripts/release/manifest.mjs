@@ -50,7 +50,7 @@ export async function loadVerifiedRelease(options = {}) {
   return { bytes, manifest };
 }
 
-export function verifyManifest(envelope, publicKeyBase64 = publicKey) {
+export function verifyManifest(envelope, publicKeyBase64 = publicKey, channel = "stable") {
   const key = createPublicKey({
     key: Buffer.from(publicKeyBase64, "base64"),
     format: "der",
@@ -67,19 +67,36 @@ export function verifyManifest(envelope, publicKeyBase64 = publicKey) {
     throw new Error("Release manifest signature is invalid.");
   }
   const manifest = JSON.parse(Buffer.from(envelope.payload, "base64url").toString("utf8"));
+  // Signed releases before the managed updater bridge do not have updater metadata.
+  const updaterIsValid =
+    manifest.updater === undefined ||
+    (manifest.updater?.protocol === 2 &&
+      /^https:\/\/raw\.githubusercontent\.com\/HQBase\/hqbase\/[a-f0-9]{40}\/scripts\/release\/bootstrap\.mjs$/.test(
+        manifest.updater?.sourceUrl
+      ) &&
+      /^[a-f0-9]{64}$/.test(manifest.updater?.sha256) &&
+      Number.isInteger(manifest.updater?.size) &&
+      manifest.updater.size > 0);
   if (
     manifest.format !== "hqbase-release-v1" ||
     manifest.product !== "hqbase" ||
-    manifest.channel !== "stable" ||
+    manifest.channel !== channel ||
     !/^\d+\.\d+\.\d+/.test(manifest.version) ||
     !/^\d+\.\d+\.\d+/.test(manifest.minVersion) ||
+    (manifest.notes !== undefined &&
+      (!Array.isArray(manifest.notes) ||
+        manifest.notes.length > 100 ||
+        manifest.notes.some(
+          (note) => typeof note !== "string" || note.length < 1 || note.length > 2_000
+        ))) ||
     !/^[a-f0-9]{64}$/.test(manifest.artifact?.sha256) ||
     !Number.isInteger(manifest.artifact?.size) ||
-    manifest.artifact.size <= 0
+    manifest.artifact.size <= 0 ||
+    !updaterIsValid
   ) {
     throw new Error("Release manifest is incompatible.");
   }
-  return manifest;
+  return { ...manifest, notes: manifest.notes ?? [] };
 }
 
 export function compareVersions(left, right) {
@@ -92,8 +109,8 @@ export function compareVersions(left, right) {
   return 0;
 }
 
-export function normalizeConfig(config, version, artifactSha256) {
-  return {
+export function normalizeConfig(config, version, artifactSha256, releaseConfig = config) {
+  const normalized = {
     ...config,
     $schema: "./node_modules/wrangler/config-schema.json",
     main: "worker/index.ts",
@@ -102,6 +119,7 @@ export function normalizeConfig(config, version, artifactSha256) {
     ],
     assets: {
       ...config.assets,
+      ...releaseConfig.assets,
       directory: "./dist"
     },
     observability: {
@@ -119,11 +137,24 @@ export function normalizeConfig(config, version, artifactSha256) {
       ...(artifactSha256 ? { HQBASE_RELEASE_ARTIFACT_SHA256: artifactSha256 } : {}),
       HQBASE_WORKER_NAME: workerNameFromConfig(config)
     },
-    d1_databases: config.d1_databases?.map((binding) => ({
-      ...binding,
-      migrations_dir: "migrations"
-    }))
+    d1_databases: config.d1_databases?.map((binding) => {
+      const normalized = { ...binding, migrations_dir: "migrations" };
+      delete normalized.migrations_pattern;
+      return normalized;
+    })
   };
+
+  if (releaseConfig.durable_objects) {
+    normalized.durable_objects = releaseConfig.durable_objects;
+  } else {
+    delete normalized.durable_objects;
+  }
+  if (releaseConfig.migrations) {
+    normalized.migrations = releaseConfig.migrations;
+  } else {
+    delete normalized.migrations;
+  }
+  return normalized;
 }
 
 export function hqbaseReleaseTag(version, artifactSha256) {

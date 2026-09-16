@@ -3,24 +3,59 @@ import { getSetting } from "../../db/client";
 import type { WorkerEnv } from "../../lib/env";
 import { AppError } from "../../lib/errors";
 import { hqbaseProductConfig } from "../../lib/product-config";
+import { withUpdateBuildLock } from "./build-lock";
+import {
+  assertManagedTrigger,
+  type BuildConfiguration,
+  type BuildVariable,
+  buildVariableEquals,
+  expectedReleaseVariable,
+  forceSourceDeployVariable,
+  isManagedDeployCommand,
+  isRestorableBuildVariable,
+  managedDeployCommand,
+  managedUpdaterLoader,
+  reconcileAcceptedBuild,
+  restoreOrThrow,
+  setBuildDeployCommand,
+  setBuildUpdaterVariables,
+  startBuild,
+  updaterLoaderVariable,
+  verifyBuildConfiguration
+} from "./build-trigger";
+import { getUpdateChannel } from "./channel";
+import { cloudflare, isAmbiguousCloudflareOperation } from "./cloudflare";
+import { inspectManagedMigrationState, type ManagedMigrationState } from "./migration-state";
 import type { ReleaseManifest, UpdateStatus } from "./types";
+import { findZoneAccount } from "./zone-account";
 
-const product = "hqbase" as const;
-const installedSchemaVersion = 2;
+export { isManagedDeployCommand, managedDeployCommand, managedUpdaterLoader };
+
 const envelopeSchema = z.object({ payload: z.string().min(1), signature: z.string().min(1) });
 const manifestSchema = z.object({
   format: z.literal("hqbase-release-v1"),
   product: z.literal("hqbase"),
-  channel: z.literal("stable"),
+  channel: z.enum(["stable", "nightly"]),
   version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
   schemaVersion: z.number().int().positive(),
   minVersion: z.string(),
   publishedAt: z.string().datetime(),
+  notes: z.array(z.string().min(1).max(2_000)).max(100).optional().default([]),
   notesUrl: z.string().url(),
   artifact: z.object({
     url: z.string().url(),
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
     size: z.number().int().nonnegative()
+  }),
+  updater: z.object({
+    protocol: z.literal(2),
+    sourceUrl: z
+      .string()
+      .regex(
+        /^https:\/\/raw\.githubusercontent\.com\/HQBase\/hqbase\/[a-f0-9]{40}\/scripts\/release\/bootstrap\.mjs$/
+      ),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    size: z.number().int().positive()
   }),
   keyId: z.literal("hqbase-release-2026-01")
 });
@@ -30,10 +65,40 @@ export async function getUpdateStatus(
   fetcher: typeof fetch = fetch
 ): Promise<UpdateStatus> {
   const installedVersion = env.HQBASE_APP_VERSION ?? "0.1.1";
-  const response = await fetcher(
+  const stable = await fetchRelease(
+    env,
+    fetcher,
     env.HQBASE_RELEASE_MANIFEST_URL?.trim() || hqbaseProductConfig.releaseManifestUrl,
-    { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5_000) }
+    "stable"
   );
+  if (!stable) throw new AppError("UPDATE_CHECK_FAILED", "Stable release is unavailable.", 503);
+  const channel = await getUpdateChannel(env.DB);
+  let release = stable;
+  if (channel === "nightly") {
+    const nightly = await fetchRelease(
+      env,
+      fetcher,
+      hqbaseProductConfig.nightlyManifestUrl,
+      "nightly",
+      true
+    );
+    if (nightly && compareVersions(nightly.version, stable.version) > 0) release = nightly;
+  }
+  return releaseStatus(env, installedVersion, channel, release);
+}
+
+async function fetchRelease(
+  env: WorkerEnv,
+  fetcher: typeof fetch,
+  url: string,
+  channel: "stable" | "nightly",
+  optional = false
+): Promise<ReleaseManifest | null> {
+  const response = await fetcher(url, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(5_000)
+  });
+  if (optional && response.status === 404) return null;
   if (!response.ok)
     throw new AppError("UPDATE_CHECK_FAILED", "Update service is unavailable.", 503);
   const envelope = envelopeSchema.parse(await response.json());
@@ -45,20 +110,65 @@ export async function getUpdateStatus(
   )
     throw new AppError("UPDATE_SIGNATURE_INVALID", "Release signature verification failed.", 503);
   const release = manifestSchema.parse(JSON.parse(decodeBase64Url(envelope.payload)));
-  if (release.product !== product)
+  if (release.channel !== channel) {
     throw new AppError(
-      "UPDATE_PRODUCT_INVALID",
-      "Release product does not match this installation.",
+      "UPDATE_CHANNEL_INVALID",
+      "The signed release does not match the update channel.",
       503
     );
+  }
+  return release as ReleaseManifest;
+}
+
+async function releaseStatus(
+  env: WorkerEnv,
+  installedVersion: string,
+  channel: "stable" | "nightly",
+  release: ReleaseManifest
+): Promise<UpdateStatus> {
+  const installed = await env.DB.prepare(
+    "SELECT installed_version, installed_schema_version FROM release_state WHERE singleton = 1"
+  )
+    .bind()
+    .first<{ installed_version: string; installed_schema_version: number }>();
+  if (!installed || !Number.isInteger(installed.installed_schema_version)) {
+    throw new AppError(
+      "UPDATE_SCHEMA_INCONSISTENT",
+      "The installed database version could not be verified.",
+      503
+    );
+  }
+  const releaseComparison = compareVersions(release.version, installedVersion);
+  let migrationState: ManagedMigrationState | null = null;
+  if (releaseComparison === 0) {
+    try {
+      migrationState = await inspectManagedMigrationState(
+        env.DB,
+        release.version,
+        release.schemaVersion
+      );
+    } catch {
+      throw new AppError(
+        "UPDATE_SCHEMA_INCONSISTENT",
+        "HQBase cannot verify this installation's database migration state. Run the signed deployment diagnostic before updating.",
+        503
+      );
+    }
+  }
+  const repairRequired = migrationState?.repairRequired ?? false;
   return {
-    product,
+    product: "hqbase",
     installedVersion,
-    installedSchemaVersion,
-    channel: "stable",
+    installedSchemaVersion: installed.installed_schema_version,
+    channel,
+    waitingForStable: channel === "stable" && releaseComparison < 0,
     checkedAt: new Date().toISOString(),
-    available: compareVersions(release.version, installedVersion) > 0,
-    compatible: compareVersions(installedVersion, release.minVersion) >= 0,
+    available: releaseComparison > 0 || repairRequired,
+    compatible:
+      compareVersions(installedVersion, release.minVersion) >= 0 &&
+      release.schemaVersion >= installed.installed_schema_version &&
+      compareVersions(release.version, installed.installed_version) >= 0,
+    repairRequired,
     release: release as ReleaseManifest
   };
 }
@@ -66,33 +176,39 @@ export async function getUpdateStatus(
 export async function triggerUpdate(
   env: WorkerEnv,
   apiToken: string,
+  expectedVersion: string,
   fetcher: typeof fetch = fetch
 ): Promise<{ buildId: string; status: string }> {
+  const update = await getUpdateStatus(env, fetcher);
+  if (update.release.version !== expectedVersion) {
+    throw new AppError(
+      "UPDATE_RELEASE_CHANGED",
+      "The signed release changed after you reviewed it. Check for updates again.",
+      409
+    );
+  }
+  if (!update.available) {
+    throw new AppError("UPDATE_NOT_AVAILABLE", "This release is already installed.", 409);
+  }
+  if (!update.compatible) {
+    throw new AppError(
+      "UPDATE_INCOMPATIBLE",
+      "This release cannot update directly from the installed version.",
+      409
+    );
+  }
   const domain =
     (await getSetting(env.DB, "portal_host", z.string())) ??
     (await getSetting(env.DB, "primary_domain", z.string()));
   if (!domain)
     throw new AppError("UPDATE_DOMAIN_REQUIRED", "Configure the workspace portal first.", 409);
   const headers = { authorization: `Bearer ${apiToken}`, "content-type": "application/json" };
-  const zones = await cloudflare<{ result: Array<{ name: string; account: { id: string } }> }>(
-    "https://api.cloudflare.com/client/v4/zones?per_page=50",
-    { headers },
-    fetcher
-  );
-  const zone = zones.result
-    .filter((candidate) => domain === candidate.name || domain.endsWith(`.${candidate.name}`))
-    .sort((left, right) => right.name.length - left.name.length)[0];
-  if (!zone)
-    throw new AppError(
-      "UPDATE_ACCOUNT_NOT_FOUND",
-      "The token cannot access the workspace zone.",
-      403
-    );
-  const accountId = zone.account.id;
+  const accountId = await findZoneAccount(domain, headers, fetcher);
   const scripts = await cloudflare<{ result: Array<{ id: string; tag?: string }> }>(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts`,
     { headers },
-    fetcher
+    fetcher,
+    "read_workers"
   );
   const script = scripts.result.find(
     (candidate) => candidate.id === (env.HQBASE_WORKER_NAME ?? "hqbase")
@@ -103,34 +219,139 @@ export async function triggerUpdate(
       "The production Worker build could not be found.",
       404
     );
+  const scriptTag = script.tag;
+  const triggersUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/builds/workers/${scriptTag}/triggers`;
   const triggers = await cloudflare<{
-    result: Array<{ id?: string; trigger_uuid?: string; branch_includes?: string[] }>;
-  }>(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/builds/workers/${script.tag}/triggers`,
-    { headers },
-    fetcher
-  );
-  const trigger =
-    triggers.result.find((item) => item.branch_includes?.includes("main")) ?? triggers.result[0];
+    result: Array<{
+      id?: string;
+      trigger_uuid?: string;
+      branch_includes?: string[];
+      deploy_command?: string | null;
+      root_directory?: string | null;
+    }>;
+  }>(triggersUrl, { headers }, fetcher, "read_build_triggers");
+  const trigger = triggers.result.find((item) => item.branch_includes?.includes("main"));
   if (!trigger)
     throw new AppError(
       "UPDATE_TRIGGER_NOT_FOUND",
       "Connect this Worker to Workers Builds before updating.",
       409
     );
-  const build = await cloudflare<{ result: { build_uuid?: string; id?: string; status?: string } }>(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/builds/triggers/${trigger.trigger_uuid ?? trigger.id}/builds`,
-    { method: "POST", headers, body: JSON.stringify({ branch: "main" }) },
-    fetcher
-  );
-  const buildId = build.result.build_uuid ?? build.result.id;
-  if (!buildId)
+  assertManagedTrigger(trigger);
+  const triggerId = trigger.trigger_uuid ?? trigger.id;
+  if (!triggerId)
     throw new AppError(
-      "UPDATE_TRIGGER_FAILED",
-      "Cloudflare did not return a build identifier.",
+      "UPDATE_TRIGGER_INVALID",
+      "Cloudflare returned an invalid production build trigger.",
       502
     );
-  return { buildId, status: build.result.status ?? "queued" };
+  return withUpdateBuildLock(env.DB, triggerId, async () => {
+    const triggerUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/builds/triggers/${triggerId}`;
+    const variablesUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/builds/triggers/${triggerId}/environment_variables`;
+    const variables = await cloudflare<{
+      result: Record<string, BuildVariable>;
+    }>(variablesUrl, { headers }, fetcher, "read_build_variables");
+    const sourceDeploy = variables.result[forceSourceDeployVariable];
+    if (sourceDeploy?.is_secret || sourceDeploy?.value?.trim() === "1") {
+      throw new AppError(
+        "UPDATE_TRIGGER_USES_SOURCE",
+        "Signed updates are disabled because this build trigger uses custom source. Use the custom-source deployment process instead.",
+        409
+      );
+    }
+    const previousPin = variables.result[expectedReleaseVariable];
+    const previousLoader = variables.result[updaterLoaderVariable];
+    if (!isRestorableBuildVariable(previousPin) || !isRestorableBuildVariable(previousLoader)) {
+      throw new AppError(
+        "UPDATE_TRIGGER_UNMANAGED",
+        "Signed updates require the updater loader and release version to be plain Workers Builds variables.",
+        409
+      );
+    }
+    const previousDeployCommand = trigger.deploy_command?.trim() ?? "";
+    const previousConfiguration: BuildConfiguration = {
+      deployCommand: previousDeployCommand,
+      variables: structuredClone(variables.result)
+    };
+    const nextConfiguration = {
+      deployCommand: managedDeployCommand(),
+      loader: managedUpdaterLoader(update.release.updater),
+      version: expectedVersion
+    };
+    try {
+      if (
+        !buildVariableEquals(previousLoader, nextConfiguration.loader) ||
+        !buildVariableEquals(previousPin, nextConfiguration.version)
+      ) {
+        await setBuildUpdaterVariables(
+          variablesUrl,
+          nextConfiguration.loader,
+          nextConfiguration.version,
+          headers,
+          fetcher
+        );
+      }
+      if (previousDeployCommand !== nextConfiguration.deployCommand) {
+        await setBuildDeployCommand(triggerUrl, nextConfiguration.deployCommand, headers, fetcher);
+      }
+      await verifyBuildConfiguration(
+        triggersUrl,
+        triggerId,
+        variablesUrl,
+        nextConfiguration,
+        headers,
+        fetcher
+      );
+    } catch (error) {
+      await restoreOrThrow(
+        triggerUrl,
+        triggersUrl,
+        triggerId,
+        variablesUrl,
+        previousConfiguration,
+        headers,
+        fetcher
+      );
+      throw error;
+    }
+
+    const dispatchStartedAt = Date.now();
+    try {
+      return await startBuild(accountId, triggerId, headers, fetcher);
+    } catch (error) {
+      if (
+        isAmbiguousCloudflareOperation(error, "start_build") ||
+        (error instanceof AppError && error.code === "UPDATE_BUILD_STATUS_UNKNOWN")
+      ) {
+        const accepted = await reconcileAcceptedBuild(
+          accountId,
+          scriptTag,
+          triggerId,
+          expectedVersion,
+          nextConfiguration.loader,
+          dispatchStartedAt,
+          headers,
+          fetcher
+        );
+        if (accepted) return accepted;
+        throw new AppError(
+          "UPDATE_BUILD_STATUS_UNKNOWN",
+          "Cloudflare did not confirm whether the Workers Build started. The verified update configuration remains in place. Check the production Workers Builds history before you try again.",
+          502
+        );
+      }
+      await restoreOrThrow(
+        triggerUrl,
+        triggersUrl,
+        triggerId,
+        variablesUrl,
+        previousConfiguration,
+        headers,
+        fetcher
+      );
+      throw error;
+    }
+  });
 }
 
 async function verifyEnvelope(
@@ -151,20 +372,6 @@ async function verifyEnvelope(
     decodeBase64UrlBytes(envelope.signature),
     decodeBase64UrlBytes(envelope.payload)
   );
-}
-async function cloudflare<T>(url: string, init: RequestInit, fetcher: typeof fetch): Promise<T> {
-  const response = await fetcher(url, init);
-  const body = (await response.json()) as {
-    success?: boolean;
-    errors?: Array<{ message?: string }>;
-  };
-  if (!response.ok || body.success === false)
-    throw new AppError(
-      "UPDATE_CLOUDFLARE_ERROR",
-      body.errors?.[0]?.message ?? "Cloudflare rejected the update request.",
-      response.status === 401 || response.status === 403 ? 403 : 502
-    );
-  return body as T;
 }
 export function compareVersions(left: string, right: string): number {
   const a = (left.split("-")[0] ?? "0").split(".").map(Number);

@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { z } from "zod";
 import {
   isRecentSession,
   requireAuthContext,
@@ -6,6 +8,10 @@ import {
   requireRole
 } from "../../auth/session";
 import type { HonoApp } from "../../lib/env";
+import { errorBody, toAppError } from "../../lib/errors";
+import { readJson } from "../../lib/json";
+import { parseWith } from "../../lib/validation";
+import { operationalLog } from "../../observability/log";
 import {
   clearRuntimeCloudflareGrantCookie,
   finishRuntimeCloudflareOAuth,
@@ -14,6 +20,7 @@ import {
   revokeRuntimeCloudflareGrant,
   startRuntimeCloudflareOAuth
 } from "../cloudflare/oauth";
+import { getUpdateChannel, setUpdateChannel } from "./channel";
 import { getUpdateStatus, triggerUpdate } from "./service";
 
 export const updateRoutes = new Hono<HonoApp>();
@@ -22,10 +29,28 @@ const updateOAuthFlow = {
   operation: "updates",
   settingsTab: "updates"
 } as const;
+const applyUpdateSchema = z.object({
+  expectedVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/)
+});
 updateRoutes.get("/", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
   requireRole(auth, ["owner", "admin"]);
   return c.json(await getUpdateStatus(c.env));
+});
+updateRoutes.get("/channel", async (c) => {
+  const auth = await requireAuthContext(c.env, c.req.raw);
+  requireRole(auth, ["owner", "admin"]);
+  return c.json({ channel: await getUpdateChannel(c.env.DB) });
+});
+updateRoutes.post("/channel", async (c) => {
+  const auth = await requireAuthContext(c.env, c.req.raw);
+  requireRole(auth, ["owner"]);
+  const input = parseWith(
+    z.object({ channel: z.enum(["stable", "nightly"]) }).strict(),
+    await readJson(c.req.raw)
+  );
+  await setUpdateChannel(c.env.DB, input.channel);
+  return c.json({ channel: input.channel });
 });
 updateRoutes.get("/cloudflare/oauth/start", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
@@ -42,9 +67,27 @@ updateRoutes.post("/apply", async (c) => {
   const auth = await requireAuthContext(c.env, c.req.raw);
   requireRole(auth, ["owner", "admin"]);
   requireRecentSession(auth);
+  const input = parseWith(applyUpdateSchema, await readJson(c.req.raw));
   const grant = await resolveRuntimeCloudflareGrant(c.req.raw, c.env);
-  const result = await triggerUpdate(c.env, grant);
-  await revokeRuntimeCloudflareGrant(grant, c.env);
-  c.header("set-cookie", clearRuntimeCloudflareGrantCookie());
-  return c.json(result, 202);
+  const outcome = await triggerUpdate(c.env, grant, input.expectedVersion).then(
+    (result) => ({ ok: true, result }) as const,
+    (error: unknown) => ({ error, ok: false }) as const
+  );
+  try {
+    await revokeRuntimeCloudflareGrant(grant, c.env);
+  } catch (error) {
+    operationalLog("warn", "cloudflare_grant_revocation_failed", {
+      errorCode: toAppError(error).code
+    });
+  } finally {
+    c.header("set-cookie", clearRuntimeCloudflareGrantCookie());
+  }
+  if (!outcome.ok) {
+    const appError = toAppError(outcome.error);
+    return c.json(
+      errorBody(appError.code, appError.message),
+      appError.status as ContentfulStatusCode
+    );
+  }
+  return c.json(outcome.result, 202);
 });

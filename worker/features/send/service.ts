@@ -1,128 +1,261 @@
+import type { MessageScope } from "../../auth/mailbox-access";
 import { newId, nowIso } from "../../db/client";
 import type { WorkerEnv } from "../../lib/env";
 import { AppError } from "../../lib/errors";
-import { draftAttachmentObjects } from "../drafts/queries";
-import { findAddressIdentity } from "../mailboxes/address-queries";
 import { findMailboxForSending } from "../mailboxes/queries";
+import type { Mailbox } from "../mailboxes/types";
 import { ensureReplySubject } from "../messages/headers";
-import { sanitizeQuotedMessageHtml } from "../messages/html-sanitizer";
-import { isSafeInlineImage } from "../messages/inline-media";
+import { getMessageDetail, listThreadMessages } from "../messages/queries";
+import { storeMessageBody } from "../messages/text-storage";
+import type { MessageSummary } from "../messages/types";
+import type { SignatureSnapshot } from "../signatures/types";
+import { assembleMessageBody, type MessageBodyPart } from "./body";
 import {
-  getMessageDetail,
-  getMessageHtmlKey,
-  insertAttachment,
-  insertMessage
-} from "../messages/queries";
-import { createThread, touchThread } from "../messages/threading";
-import type { MessageSummary, StoredAttachment } from "../messages/types";
-
-import { buildReplyBody } from "./reply-body";
+  asEmailAttachment,
+  loadAttachments,
+  loadQuotedMessageHtml,
+  maxAttachmentBytes,
+  maxAttachmentCount,
+  prepareAuthoredContent,
+  prepareSignature,
+  prepareStoredAttachments,
+  requireAttachmentLimits,
+  resolveAuthoredDraftId,
+  type StoredOutgoingAttachment,
+  totalAttachmentBytes
+} from "./content-attachments";
+import { deliverPreparedMail } from "./delivery";
+import { identifySend, makeSendPayload, resumeSend, type SendIdentity } from "./operations";
+import { buildReplyChainContext } from "./reply-body";
 import type { ReplyMessageInput, SendMessageInput } from "./validation";
 
 export async function sendNewMessage(
   env: WorkerEnv,
   input: SendMessageInput,
-  userId?: string
+  principalId?: string,
+  signature?: SignatureSnapshot,
+  context?: MessageBodyPart,
+  contextAttachments: StoredOutgoingAttachment[] = [],
+  operationIdentity?: SendIdentity
 ): Promise<MessageSummary> {
-  await ensureActiveMailbox(env.DB, input.from);
+  const mailbox = await ensureActiveMailbox(env.DB, input.from);
+  const identity = operationIdentity ?? (await identifySend(principalId, input, "send"));
+  const previous = await resumeSend(env, identity);
+  if (previous) return previous;
 
   const timestamp = nowIso();
+  const draftAttachments = await loadAttachments(env, input.attachmentIds, principalId);
+  const authoredDraftId = resolveAuthoredDraftId(input.draftId, draftAttachments);
+  const authored = prepareAuthoredContent({
+    html: input.html,
+    text: input.text,
+    draftId: authoredDraftId,
+    attachments: draftAttachments
+  });
+  const preparedDraftAttachments = prepareStoredAttachments(authored.attachments, timestamp);
+  const preparedSignature = prepareSignature(signature, timestamp);
+  const preparedContextAttachments = prepareStoredAttachments(contextAttachments, timestamp);
+  const body = assembleMessageBody({
+    authored: authored.body,
+    signature: preparedSignature.snapshot,
+    context
+  });
+  const attachments = [
+    ...preparedDraftAttachments,
+    ...preparedSignature.attachments,
+    ...preparedContextAttachments
+  ];
+  requireAttachmentLimits(attachments);
   const email = {
-    from: input.from,
+    from: { name: mailbox.displayName, email: mailbox.address },
     to: input.to,
     subject: input.subject,
-    text: input.text
+    text: body.text
   };
-  const attachments = await loadAttachments(env, input.attachmentIds, userId);
-  const sendResult = await env.MAIL_SENDER.send({
-    ...email,
-    ...(input.cc.length ? { cc: input.cc } : {}),
-    ...(input.bcc.length ? { bcc: input.bcc } : {}),
-    ...(input.html ? { html: input.html } : {}),
-    ...(attachments.length ? { attachments: attachments.map(asEmailAttachment) } : {})
-  });
-  const threadId = await createThread(env.DB, input.subject, timestamp);
-
-  return storeSentMessage(env, {
-    ...input,
-    inReplyTo: null,
-    messageId: sendResult.messageId,
-    references: [],
-    sentAt: timestamp,
-    subject: input.subject,
-    threadId,
-    storedAttachments: attachments,
-    draftId: input.draftId ?? null,
-    userId: userId ?? null
-  });
+  const storedBody = await storeMessageBody(
+    env.MAIL_OBJECTS,
+    body.text,
+    body.html,
+    `sent/${timestamp.slice(0, 10)}/${newId("obj")}`
+  );
+  const payload = makeSendPayload(
+    {
+      threadId: newId("thr"),
+      isUnassigned: false,
+      mailboxId: mailbox.id,
+      direction: "outbound",
+      folder: "sent",
+      fromAddress: input.from,
+      fromName: mailbox.displayName,
+      to: input.to,
+      cc: input.cc,
+      bcc: input.bcc,
+      subject: input.subject,
+      snippet: body.text.replace(/\s+/g, " ").trim().slice(0, 180),
+      ...storedBody,
+      rawR2Key: null,
+      messageId: null,
+      dedupeKey: null,
+      inReplyTo: null,
+      references: [],
+      receivedAt: null,
+      sentAt: timestamp,
+      readAt: timestamp,
+      hasAttachments: attachments.some((attachment) => attachment.disposition === "attachment")
+    },
+    attachments,
+    true
+  );
+  return deliverPreparedMail(
+    env,
+    identity,
+    payload,
+    {
+      ...email,
+      ...(input.cc.length ? { cc: input.cc } : {}),
+      ...(input.bcc.length ? { bcc: input.bcc } : {}),
+      ...(body.html ? { html: body.html } : {}),
+      ...(attachments.length ? { attachments: attachments.map(asEmailAttachment) } : {})
+    },
+    attachments
+  );
 }
 
 export async function replyToMessage(
   env: WorkerEnv,
   input: ReplyMessageInput,
-  userId?: string
+  principalId?: string,
+  signature?: SignatureSnapshot,
+  messageScope?: MessageScope
 ): Promise<MessageSummary> {
-  await ensureActiveMailbox(env.DB, input.from);
+  const mailbox = await ensureActiveMailbox(env.DB, input.from);
+  const identity = await identifySend(principalId, input, "reply");
+  const previous = await resumeSend(env, identity);
+  if (previous) return previous;
 
-  const original = await getMessageDetail(env.DB, input.messageId);
+  const original = await getMessageDetail(env.DB, input.messageId, env.MAIL_OBJECTS);
   if (!original) {
     throw new AppError("MESSAGE_NOT_FOUND", "Message not found.", 404);
   }
+  const threadMessages = messageScope
+    ? (await listThreadMessages(env.DB, original.threadId, messageScope, env.MAIL_OBJECTS)).filter(
+        (message) => (message.folder === "trash") === (original.folder === "trash")
+      )
+    : [original];
+  const targetIndex = threadMessages.findIndex((message) => message.id === original.id);
+  const replyChain = targetIndex < 0 ? [original] : threadMessages.slice(0, targetIndex + 1);
 
   const timestamp = nowIso();
   const references = [...original.references, original.messageId].filter(
     (value): value is string => value !== null
   );
-  const to = input.to?.length ? input.to : [original.fromAddress];
-  const attachments = await loadAttachments(env, input.attachmentIds, userId);
+  const to = input.to?.length
+    ? input.to
+    : original.replyTo?.length
+      ? original.replyTo
+      : [original.fromAddress];
+  if (to.length + input.cc.length + input.bcc.length > 50) {
+    throw new AppError("RECIPIENTS_TOO_MANY", "Choose at most 50 total recipients.", 400);
+  }
+  const draftAttachments = await loadAttachments(env, input.attachmentIds, principalId);
+  const authoredDraftId = resolveAuthoredDraftId(input.draftId, draftAttachments);
+  const authored = prepareAuthoredContent({
+    html: input.html,
+    text: input.text,
+    draftId: authoredDraftId,
+    attachments: draftAttachments
+  });
+  const preparedDraftAttachments = prepareStoredAttachments(authored.attachments, timestamp);
+  const preparedSignature = prepareSignature(signature, timestamp);
+  const baseAttachments = [...preparedDraftAttachments, ...preparedSignature.attachments];
+  requireAttachmentLimits(baseAttachments);
   const quoted =
-    input.html && original.htmlAvailable
+    (authored.body.html || preparedSignature.snapshot?.html) && original.htmlAvailable
       ? await loadQuotedMessageHtml(
           env,
           original.id,
           original.attachments,
-          maxAttachmentBytes - totalAttachmentBytes(attachments)
+          maxAttachmentBytes - totalAttachmentBytes(baseAttachments),
+          maxAttachmentCount - baseAttachments.length,
+          replyChain.length === 1
         )
       : { html: undefined, inlineAttachments: [] };
-  const body = buildReplyBody(input, original, quoted.html);
-  const outgoingAttachments = [...attachments, ...quoted.inlineAttachments];
-  const sendResult = await env.MAIL_SENDER.send({
-    from: input.from,
-    to,
-    ...(input.cc.length ? { cc: input.cc } : {}),
-    ...(input.bcc.length ? { bcc: input.bcc } : {}),
-    subject: ensureReplySubject(original.subject),
-    text: body.text,
-    headers: {
-      "In-Reply-To": original.messageId ?? original.id,
-      References: references.join(" ")
+  const signatureTextLength = preparedSignature.snapshot?.text.trim().length ?? 0;
+  const context = buildReplyChainContext(
+    replyChain,
+    quoted.html,
+    100_000 - input.text.trim().length - signatureTextLength - 4
+  );
+  const body = assembleMessageBody({
+    authored: authored.body,
+    signature: preparedSignature.snapshot,
+    context:
+      authored.body.html || preparedSignature.snapshot?.html ? context : { text: context.text }
+  });
+  const preparedQuotedAttachments = prepareStoredAttachments(quoted.inlineAttachments, timestamp);
+  const outgoingAttachments = [...baseAttachments, ...preparedQuotedAttachments];
+  requireAttachmentLimits(outgoingAttachments);
+  const storedBody = await storeMessageBody(
+    env.MAIL_OBJECTS,
+    body.text,
+    body.html,
+    `sent/${timestamp.slice(0, 10)}/${newId("obj")}`
+  );
+  const payload = makeSendPayload(
+    {
+      threadId: original.threadId,
+      isUnassigned: false,
+      mailboxId: mailbox.id,
+      direction: "outbound",
+      folder: "sent",
+      fromAddress: input.from,
+      fromName: mailbox.displayName,
+      to,
+      cc: input.cc,
+      bcc: input.bcc,
+      subject: ensureReplySubject(original.subject),
+      snippet: body.text.replace(/\s+/g, " ").trim().slice(0, 180),
+      ...storedBody,
+      rawR2Key: null,
+      messageId: null,
+      dedupeKey: null,
+      inReplyTo: original.messageId,
+      references,
+      receivedAt: null,
+      sentAt: timestamp,
+      readAt: timestamp,
+      hasAttachments: outgoingAttachments.some(
+        (attachment) => attachment.disposition === "attachment"
+      )
     },
-    ...(body.html ? { html: body.html } : {}),
-    ...(outgoingAttachments.length
-      ? { attachments: outgoingAttachments.map(asEmailAttachment) }
-      : {})
-  });
-
-  return storeSentMessage(env, {
-    from: input.from,
-    to,
-    cc: input.cc,
-    bcc: input.bcc,
-    subject: ensureReplySubject(original.subject),
-    text: body.text,
-    ...(body.html ? { html: body.html } : {}),
-    inReplyTo: original.messageId ?? original.id,
-    messageId: sendResult.messageId,
-    references,
-    sentAt: timestamp,
-    threadId: original.threadId,
-    storedAttachments: outgoingAttachments,
-    draftId: input.draftId ?? null,
-    userId: userId ?? null
-  });
+    outgoingAttachments,
+    false
+  );
+  return deliverPreparedMail(
+    env,
+    identity,
+    payload,
+    {
+      from: { name: mailbox.displayName, email: mailbox.address },
+      to,
+      ...(input.cc.length ? { cc: input.cc } : {}),
+      ...(input.bcc.length ? { bcc: input.bcc } : {}),
+      subject: ensureReplySubject(original.subject),
+      text: body.text,
+      headers: {
+        ...(original.messageId ? { "In-Reply-To": original.messageId } : {}),
+        References: references.join(" ")
+      },
+      ...(body.html ? { html: body.html } : {}),
+      ...(outgoingAttachments.length
+        ? { attachments: outgoingAttachments.map(asEmailAttachment) }
+        : {})
+    },
+    outgoingAttachments
+  );
 }
 
-async function ensureActiveMailbox(db: D1Database, address: string): Promise<void> {
+async function ensureActiveMailbox(db: D1Database, address: string): Promise<Mailbox> {
   const mailbox = await findMailboxForSending(db, address);
   if (!mailbox) {
     throw new AppError("MAILBOX_NOT_FOUND", "Sending mailbox not found.", 404);
@@ -130,176 +263,5 @@ async function ensureActiveMailbox(db: D1Database, address: string): Promise<voi
   if (!mailbox.isActive) {
     throw new AppError("MAILBOX_DISABLED", "Disabled mailboxes cannot send email.", 400);
   }
-}
-
-async function storeSentMessage(
-  env: WorkerEnv,
-  input: {
-    from: string;
-    to: string[];
-    cc: string[];
-    bcc: string[];
-    subject: string;
-    text: string;
-    html?: string | undefined;
-    inReplyTo: string | null;
-    messageId: string;
-    references: string[];
-    sentAt: string;
-    threadId: string;
-    storedAttachments: StoredOutgoingAttachment[];
-    draftId: string | null;
-    userId: string | null;
-  }
-): Promise<MessageSummary> {
-  const mailbox = await findMailboxForSending(env.DB, input.from);
-  if (!mailbox) {
-    throw new AppError("MAILBOX_NOT_FOUND", "Sending mailbox not found.", 404);
-  }
-
-  const htmlR2Key = input.html ? `sent/${input.sentAt.slice(0, 10)}/${newId("html")}.html` : null;
-  if (input.html && htmlR2Key) {
-    await env.MAIL_OBJECTS.put(htmlR2Key, input.html, {
-      httpMetadata: { contentType: "text/html; charset=utf-8" }
-    });
-  }
-
-  await touchThread(env.DB, input.threadId, input.sentAt);
-  const sendingIdentity = await findAddressIdentity(env.DB, input.from, "send");
-  const message = await insertMessage(env.DB, {
-    threadId: input.threadId,
-    mailboxId: mailbox.id,
-    direction: "outbound",
-    folder: "sent",
-    fromAddress: input.from,
-    to: input.to,
-    cc: input.cc,
-    bcc: input.bcc,
-    subject: input.subject,
-    snippet: input.text.replace(/\s+/g, " ").trim().slice(0, 180),
-    textBody: input.text,
-    htmlR2Key,
-    rawR2Key: null,
-    messageId: input.messageId,
-    dedupeKey: null,
-    inReplyTo: input.inReplyTo,
-    references: input.references,
-    receivedAt: null,
-    sentAt: input.sentAt,
-    readAt: input.sentAt,
-    hasAttachments: input.storedAttachments.length > 0,
-    sentFromAddressId: sendingIdentity?.address.id ?? null
-  });
-  for (const attachment of input.storedAttachments) {
-    await insertAttachment(env.DB, {
-      messageId: message.id,
-      filename: attachment.filename,
-      contentType: attachment.contentType,
-      sizeBytes: attachment.sizeBytes,
-      contentId: attachment.contentId,
-      r2Key: attachment.r2Key
-    });
-  }
-  if (input.draftId && input.userId) {
-    await env.DB.prepare("DELETE FROM drafts WHERE id = ? AND user_id = ?")
-      .bind(input.draftId, input.userId)
-      .run();
-  }
-  return message;
-}
-
-const maxAttachmentBytes = 25 * 1024 * 1024;
-
-type StoredDraftAttachment = Awaited<ReturnType<typeof draftAttachmentObjects>>[number];
-type StoredOutgoingAttachment = StoredDraftAttachment & {
-  contentId: string | null;
-  disposition: "attachment" | "inline";
-};
-
-async function loadAttachments(
-  env: WorkerEnv,
-  ids: string[],
-  userId?: string
-): Promise<StoredOutgoingAttachment[]> {
-  if (ids.length === 0) return [];
-  if (!userId)
-    throw new AppError("ATTACHMENTS_FORBIDDEN", "Attachments require a user session.", 403);
-  return (await draftAttachmentObjects(env.DB, env.MAIL_OBJECTS, userId, ids)).map(
-    (attachment) => ({
-      ...attachment,
-      contentId: null,
-      disposition: "attachment"
-    })
-  );
-}
-
-async function loadQuotedMessageHtml(
-  env: WorkerEnv,
-  messageId: string,
-  attachments: StoredAttachment[],
-  availableBytes: number
-): Promise<{ html?: string; inlineAttachments: StoredOutgoingAttachment[] }> {
-  const htmlKey = await getMessageHtmlKey(env.DB, messageId);
-  if (!htmlKey) return { inlineAttachments: [] };
-  const htmlObject = await env.MAIL_OBJECTS.get(htmlKey);
-  if (!htmlObject) return { inlineAttachments: [] };
-  const sourceHtml = await htmlObject.text();
-  const candidates = attachments.filter(
-    (attachment) => attachment.contentId && isSafeInlineImage(attachment.contentType)
-  );
-  const referenced = new Set(
-    sanitizeQuotedMessageHtml({ attachments: candidates, html: sourceHtml }).inlineAttachmentIds
-  );
-  let remainingBytes = Math.max(0, availableBytes);
-  const selected = candidates.filter((attachment) => {
-    if (!referenced.has(attachment.id) || attachment.sizeBytes > remainingBytes) return false;
-    remainingBytes -= attachment.sizeBytes;
-    return true;
-  });
-  const hydrated = (
-    await Promise.all(
-      selected.map(async (attachment): Promise<StoredOutgoingAttachment | null> => {
-        const object = await env.MAIL_OBJECTS.get(attachment.r2Key);
-        if (!object || !attachment.contentId) return null;
-        return {
-          id: attachment.id,
-          filename: attachment.filename,
-          contentType: attachment.contentType,
-          sizeBytes: attachment.sizeBytes,
-          r2Key: attachment.r2Key,
-          content: await object.arrayBuffer(),
-          contentId: stripContentIdBrackets(attachment.contentId),
-          disposition: "inline"
-        };
-      })
-    )
-  ).filter((attachment): attachment is StoredOutgoingAttachment => attachment !== null);
-  const sanitized = sanitizeQuotedMessageHtml({ attachments: hydrated, html: sourceHtml });
-  return { html: sanitized.html, inlineAttachments: hydrated };
-}
-
-function totalAttachmentBytes(attachments: StoredOutgoingAttachment[]): number {
-  return attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0);
-}
-
-function stripContentIdBrackets(value: string): string {
-  return value.trim().replace(/^<|>$/g, "");
-}
-
-function asEmailAttachment(attachment: StoredOutgoingAttachment): EmailAttachment {
-  if (attachment.disposition === "inline" && attachment.contentId) {
-    return {
-      disposition: "inline",
-      contentId: attachment.contentId,
-      filename: attachment.filename,
-      type: attachment.contentType,
-      content: attachment.content
-    };
-  }
-  return {
-    disposition: "attachment",
-    filename: attachment.filename,
-    type: attachment.contentType,
-    content: attachment.content
-  };
+  return mailbox;
 }

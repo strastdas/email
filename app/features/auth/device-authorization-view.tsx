@@ -7,9 +7,11 @@ import { Input } from "@/components/ui/input";
 const scopeDescriptions: Record<string, string> = {
   "mail:read":
     "Read allowed mailboxes, conversations, message text, threads, and bounded attachments",
-  "mail:write": "Change message and conversation state where you have Agent access",
+  "mail:write": "Change message and conversation state where you have Handle mail access",
   "mail:send":
-    "Manage drafts and attachments, then send, reply, or forward where you have Agent access",
+    "Manage drafts and attachments, then send, reply, or forward where you have Handle mail access",
+  "signatures:manage":
+    "Manage personal signatures and shared signatures where you have management access",
   offline_access: "Stay connected until you revoke access"
 };
 
@@ -119,7 +121,7 @@ export function DeviceCodeEntry({
               <Input
                 autoCapitalize="characters"
                 autoComplete="one-time-code"
-                className="h-10 bg-background font-mono uppercase tracking-widest shadow-none focus-visible:ring-1"
+                className="bg-background font-mono uppercase tracking-widest shadow-none"
                 id="device-code"
                 maxLength={12}
                 onChange={(event) => onInputCodeChange(event.target.value)}

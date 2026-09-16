@@ -1,3 +1,7 @@
+import { and, eq, sql } from "drizzle-orm";
+
+import { createDatabase, getRow } from "../../db/drizzle";
+import { userOnboarding } from "../../db/schema";
 import type { WorkerEnv } from "../../lib/env";
 import { AppError } from "../../lib/errors";
 
@@ -13,9 +17,10 @@ export async function sendPasswordSetupEmail(
 ): Promise<void> {
   const [sender, onboarding] = await Promise.all([
     invitationSender(env.DB),
-    env.DB.prepare("SELECT method, status FROM user_onboarding WHERE user_id = ?")
-      .bind(input.user.id)
-      .first<{ method: "email_invite" | "temporary_password"; status: "pending" | "complete" }>()
+    getRow<{
+      method: "email_invite" | "temporary_password";
+      status: "pending" | "complete";
+    }>(env.DB, sql`SELECT method, status FROM user_onboarding WHERE user_id = ${input.user.id}`)
   ]);
   if (!sender) {
     throw new AppError(
@@ -50,31 +55,27 @@ export async function sendPasswordSetupEmail(
 
   if (invitation) {
     const timestamp = new Date().toISOString();
-    await env.DB.prepare(
-      `UPDATE user_onboarding
-       SET invitation_sent_at = ?, updated_at = ?
-       WHERE user_id = ? AND status = 'pending'`
-    )
-      .bind(timestamp, timestamp, input.user.id)
+    await createDatabase(env.DB)
+      .update(userOnboarding)
+      .set({ invitationSentAt: timestamp, updatedAt: timestamp })
+      .where(and(eq(userOnboarding.userId, input.user.id), eq(userOnboarding.status, "pending")))
       .run();
   }
 }
 
 async function invitationSender(db: D1Database): Promise<string | null> {
-  const row = await db
-    .prepare(
-      `SELECT address.address
-       FROM mailbox_addresses address
-       JOIN mailboxes mailbox ON mailbox.id = address.mailbox_id
-       JOIN mail_domains domain ON domain.id = address.mail_domain_id
+  const row = await getRow<{ address: string }>(
+    db,
+    sql`SELECT mailbox.address
+       FROM mailboxes mailbox
+       JOIN mail_domains domain ON domain.id = mailbox.mail_domain_id
        WHERE mailbox.is_active = 1
-         AND address.send_enabled = 1
+         AND mailbox.deleted_at IS NULL
          AND domain.is_enabled = 1
          AND domain.sending_status = 'ready'
-       ORDER BY address.is_primary DESC, mailbox.created_at ASC, address.address ASC
+       ORDER BY mailbox.created_at ASC, mailbox.address ASC
        LIMIT 1`
-    )
-    .first<{ address: string }>();
+  );
   return row?.address ?? null;
 }
 

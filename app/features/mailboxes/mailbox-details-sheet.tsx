@@ -1,14 +1,19 @@
-import { ChevronDown, Plus, Users } from "lucide-react";
-import type * as React from "react";
+import * as React from "react";
+import { PiTrash, PiUsers } from "react-icons/pi";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
+import { Spinner } from "@/components/ui/spinner";
 import {
   formatAccessLevel,
   getMailboxAccessEntries,
   type MailboxAccessPolicies
 } from "@/features/mailbox-access/mailbox-access-policies";
 import type { WorkspaceUser } from "@/features/users/types";
+import { updateMailbox } from "./api";
 import type { Mailbox } from "./types";
 
 export function MailboxDetailsSheet({
@@ -16,24 +21,45 @@ export function MailboxDetailsSheet({
   mailbox,
   policies,
   users,
-  onAddAddress,
+  onChanged,
+  onDelete,
   onManageAccess,
-  onOpenChange,
-  onRemoveAddress,
-  onToggle
+  onOpenChange
 }: {
   canManage: boolean;
   mailbox: Mailbox | null;
   policies: MailboxAccessPolicies;
   users: WorkspaceUser[];
-  onAddAddress: (mailbox: Mailbox) => void;
+  onChanged: () => Promise<void>;
+  onDelete: (mailbox: Mailbox) => void;
   onManageAccess: (mailbox: Mailbox) => void;
   onOpenChange: (open: boolean) => void;
-  onRemoveAddress: (mailbox: Mailbox, addressId: string) => void;
-  onToggle: (mailbox: Mailbox) => void;
 }): React.ReactElement {
   const people = mailbox ? getMailboxAccessEntries(mailbox.id, policies.grants, users) : [];
-  const additionalAddresses = mailbox?.addresses.filter((address) => !address.isPrimary) ?? [];
+  const [senderName, setSenderName] = React.useState("");
+  const [senderNamePending, setSenderNamePending] = React.useState(false);
+
+  React.useEffect(() => {
+    setSenderName(mailbox?.displayName ?? "");
+    setSenderNamePending(false);
+  }, [mailbox?.displayName]);
+
+  async function saveSenderName(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!mailbox) return;
+    const displayName = senderName.trim();
+    if (!displayName || displayName === mailbox.displayName) return;
+    setSenderNamePending(true);
+    try {
+      await updateMailbox(mailbox.id, { displayName });
+      await onChanged();
+      toast.success("Sender name updated.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Sender name could not be updated.");
+    } finally {
+      setSenderNamePending(false);
+    }
+  }
 
   return (
     <Sheet open={mailbox !== null} onOpenChange={onOpenChange}>
@@ -45,22 +71,61 @@ export function MailboxDetailsSheet({
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Mailbox details
           </p>
-          <SheetTitle className="mt-1 truncate text-lg font-semibold">
+          <SheetTitle className="mt-1 truncate text-base font-semibold">
             {mailbox?.address ?? "Mailbox"}
           </SheetTitle>
-          <SheetDescription className="mt-1 text-sm text-muted-foreground">
+          <SheetDescription className="mt-1 text-xs text-muted-foreground">
             {mailbox?.displayName ?? "Shared workspace mailbox"}
           </SheetDescription>
         </header>
 
-        <div className="space-y-7 px-5 py-6 sm:px-6">
+        <div className="space-y-6 px-5 py-5 sm:px-6">
+          {canManage && mailbox ? (
+            <section aria-labelledby="mailbox-sender-heading">
+              <h3 className="text-sm font-medium" id="mailbox-sender-heading">
+                Sender name
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Recipients see {senderName.trim() || mailbox.displayName} &lt;{mailbox.address}&gt;.
+              </p>
+              <form className="mt-3 flex items-end gap-2" onSubmit={saveSenderName}>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <Label className="text-xs" htmlFor="mailbox-sender-name">
+                    Sender name
+                  </Label>
+                  <Input
+                    className="text-[13px] max-sm:h-[38px]"
+                    id="mailbox-sender-name"
+                    maxLength={80}
+                    required
+                    size="sm"
+                    value={senderName}
+                    onChange={(event) => setSenderName(event.target.value)}
+                  />
+                </div>
+                <Button
+                  className="max-sm:h-[38px] max-sm:min-h-[38px]"
+                  disabled={
+                    senderNamePending ||
+                    !senderName.trim() ||
+                    senderName.trim() === mailbox.displayName
+                  }
+                  type="submit"
+                >
+                  {senderNamePending ? <Spinner aria-hidden="true" /> : null}
+                  Save
+                </Button>
+              </form>
+            </section>
+          ) : null}
+
           <section aria-labelledby="mailbox-access-heading">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h3 className="font-medium" id="mailbox-access-heading">
+                <h3 className="text-sm font-medium" id="mailbox-access-heading">
                   People with access
                 </h3>
-                <p className="mt-1 text-sm text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   Owners always have Manager access. Everyone else needs an explicit grant.
                 </p>
               </div>
@@ -71,17 +136,17 @@ export function MailboxDetailsSheet({
                   type="button"
                   onClick={() => onManageAccess(mailbox)}
                 >
-                  <Users data-icon="inline-start" />
+                  <PiUsers data-icon="inline-start" />
                   Manage access
                 </Button>
               ) : null}
             </div>
 
-            <div className="mt-4 divide-y rounded-md border">
+            <div className="mt-3 divide-y rounded-md border">
               {people.map((person) => (
-                <div className="flex items-center justify-between gap-3 px-3 py-3" key={person.id}>
+                <div className="flex items-center justify-between gap-3 px-3 py-2" key={person.id}>
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{person.name}</p>
+                    <p className="truncate text-[13px] font-medium">{person.name}</p>
                     {person.email ? (
                       <p className="mt-0.5 truncate text-xs text-muted-foreground">
                         {person.email}
@@ -94,104 +159,34 @@ export function MailboxDetailsSheet({
                 </div>
               ))}
               {!canManage && mailbox?.accessLevel ? (
-                <div className="flex items-center justify-between gap-3 px-3 py-3">
-                  <p className="text-sm font-medium">Your access</p>
+                <div className="flex items-center justify-between gap-3 px-3 py-2">
+                  <p className="text-[13px] font-medium">Your access</p>
                   <Badge variant="secondary">{formatAccessLevel(mailbox.accessLevel)}</Badge>
                 </div>
               ) : null}
             </div>
           </section>
 
-          <details className="group border-t pt-5">
-            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between rounded-md text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              More settings
-              <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180 motion-reduce:transition-none" />
-            </summary>
-            <div className="mt-3 space-y-5 rounded-md bg-muted/35 p-4">
-              <section aria-labelledby="additional-addresses-heading">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <h4 className="text-sm font-medium" id="additional-addresses-heading">
-                      Additional email addresses
-                    </h4>
-                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      Mail sent to these addresses arrives in this mailbox. They can also be used
-                      when sending.
-                    </p>
-                  </div>
-                  {canManage && mailbox ? (
-                    <Button
-                      aria-label={`Add an email address to ${mailbox.address}`}
-                      className="shrink-0"
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                      onClick={() => onAddAddress(mailbox)}
-                    >
-                      <Plus data-icon="inline-start" />
-                      Add
-                    </Button>
-                  ) : null}
-                </div>
-                {additionalAddresses.length ? (
-                  <ul className="mt-3 divide-y rounded-md border bg-background">
-                    {additionalAddresses.map((address) => (
-                      <li
-                        className="flex min-h-11 items-center justify-between gap-3 px-3 py-2"
-                        key={address.id}
-                      >
-                        <span className="min-w-0 truncate text-sm">{address.address}</span>
-                        {canManage && mailbox ? (
-                          <Button
-                            aria-label={`Remove ${address.address}`}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                            onClick={() => onRemoveAddress(mailbox, address.id)}
-                          >
-                            Remove
-                          </Button>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    No additional email addresses.
-                  </p>
-                )}
-              </section>
-
-              <div className="border-t pt-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-medium">Mailbox status</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      {mailbox?.isActive
-                        ? "This mailbox can receive and send mail."
-                        : "This mailbox is currently disabled."}
-                    </p>
-                  </div>
-                  {mailbox ? (
-                    canManage ? (
-                      <Button
-                        size="sm"
-                        type="button"
-                        variant="outline"
-                        onClick={() => onToggle(mailbox)}
-                      >
-                        {mailbox.isActive ? "Disable" : "Enable"}
-                      </Button>
-                    ) : (
-                      <Badge variant={mailbox.isActive ? "secondary" : "outline"}>
-                        {mailbox.isActive ? "Active" : "Disabled"}
-                      </Badge>
-                    )
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          </details>
+          {canManage && mailbox ? (
+            <section className="border-t pt-5" aria-labelledby="delete-mailbox-heading">
+              <h3 className="text-sm font-medium" id="delete-mailbox-heading">
+                Delete mailbox
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Hide this mailbox and stop new mail without deleting its history.
+              </p>
+              <Button
+                className="mt-4"
+                size="sm"
+                type="button"
+                variant="destructive"
+                onClick={() => onDelete(mailbox)}
+              >
+                <PiTrash data-icon="inline-start" />
+                Delete mailbox
+              </Button>
+            </section>
+          ) : null}
         </div>
       </SheetContent>
     </Sheet>

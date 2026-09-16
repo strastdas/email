@@ -1,5 +1,5 @@
-import { Copy, KeyRound, Mail, UserPlus } from "lucide-react";
 import * as React from "react";
+import { PiCopy, PiEnvelope, PiKey, PiUserPlus } from "react-icons/pi";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -83,7 +83,7 @@ export function UserOnboardingDialog({
       reset();
     } catch (error) {
       onCreated();
-      toast.error(error instanceof Error ? error.message : "User onboarding failed.");
+      toast.error(error instanceof Error ? error.message : "Person onboarding failed.");
     } finally {
       setPending(false);
     }
@@ -98,9 +98,9 @@ export function UserOnboardingDialog({
       }}
     >
       <DialogTrigger asChild>
-        <Button type="button">
-          <UserPlus data-icon="inline-start" />
-          Add user
+        <Button size="sm" type="button">
+          <PiUserPlus data-icon="inline-start" />
+          Add person
         </Button>
       </DialogTrigger>
       <DialogContent className="w-[min(92vw,560px)]">
@@ -109,7 +109,7 @@ export function UserOnboardingDialog({
         ) : (
           <>
             <DialogHeader>
-              <DialogTitle>Add user</DialogTitle>
+              <DialogTitle>Add person</DialogTitle>
               <DialogDescription>
                 Choose how this person will receive workspace sign-in access.
               </DialogDescription>
@@ -120,17 +120,17 @@ export function UserOnboardingDialog({
             >
               <TabsList className="grid w-full grid-cols-2">
                 <TabsTrigger value="email_invite">
-                  <Mail data-icon="inline-start" />
+                  <PiEnvelope data-icon="inline-start" />
                   Email invite
                 </TabsTrigger>
                 <TabsTrigger value="temporary_password">
-                  <KeyRound data-icon="inline-start" />
+                  <PiKey data-icon="inline-start" />
                   Create directly
                 </TabsTrigger>
               </TabsList>
               <TabsContent value="email_invite">
                 <p className="mb-5 text-sm text-muted-foreground">
-                  Send a seven-day link so the user can choose their own password.
+                  Send a seven-day link so the person can choose their own password.
                 </p>
                 <UserIdentityForm
                   email={email}
@@ -235,7 +235,7 @@ function UserIdentityForm({
         </DialogClose>
         <Button disabled={pending} type="submit">
           {pending ? <Spinner data-icon="inline-start" /> : null}
-          {method === "email_invite" ? "Send invitation" : "Create user"}
+          {method === "email_invite" ? "Send invitation" : "Create person"}
         </Button>
       </DialogFooter>
     </form>
@@ -263,21 +263,28 @@ export function TemporaryPasswordReveal({
         </DialogDescription>
       </DialogHeader>
       <Alert>
-        <KeyRound />
+        <PiKey />
         <AlertTitle>Shown once</AlertTitle>
         <AlertDescription>
-          HQBase stores only the password hash. The user must replace this password after signing
+          HQBase stores only the password hash. The person must replace this password after signing
           in.
         </AlertDescription>
       </Alert>
       <div className="flex items-center gap-2">
-        <Input aria-label="Temporary password" readOnly value={credential.password} />
+        <Input
+          aria-label="Temporary password"
+          className="max-sm:h-[38px]"
+          readOnly
+          size="sm"
+          value={credential.password}
+        />
         <Button
           aria-label="Copy temporary password"
+          className="max-sm:size-[38px] max-sm:min-h-[38px] max-sm:min-w-[38px]"
           onClick={() => void copyPassword()}
           size="icon"
         >
-          <Copy />
+          <PiCopy />
         </Button>
       </div>
       <DialogFooter>

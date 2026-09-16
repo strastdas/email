@@ -1,24 +1,36 @@
+vi.mock("@worker/features/send/operations", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@worker/features/send/operations")>()),
+  resumeSend: vi.fn().mockResolvedValue(null)
+}));
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@worker/features/drafts/queries", () => ({
   addDraftAttachment: vi.fn(),
   deleteDraft: vi.fn(),
+  removeDraftAttachment: vi.fn(),
   saveDraft: vi.fn()
 }));
 vi.mock("@worker/features/mailboxes/queries", () => ({
   findMailboxForSending: vi.fn()
 }));
 vi.mock("@worker/features/messages/queries", () => ({
-  getMessageDetail: vi.fn()
+  getMessageDetail: vi.fn(),
+  getMessageHtmlKey: vi.fn()
 }));
 vi.mock("@worker/features/send/service", () => ({
   sendNewMessage: vi.fn()
 }));
 
-import { addDraftAttachment, deleteDraft, saveDraft } from "@worker/features/drafts/queries";
+import {
+  addDraftAttachment,
+  deleteDraft,
+  removeDraftAttachment,
+  saveDraft
+} from "@worker/features/drafts/queries";
 import { findMailboxForSending } from "@worker/features/mailboxes/queries";
-import { getMessageDetail } from "@worker/features/messages/queries";
-import { forwardMessage } from "@worker/features/send/forward";
+import { getMessageDetail, getMessageHtmlKey } from "@worker/features/messages/queries";
+import { forwardMessage, sendForwardDraft } from "@worker/features/send/forward";
 import { sendNewMessage } from "@worker/features/send/service";
 import type { WorkerEnv } from "@worker/lib/env";
 
@@ -29,6 +41,7 @@ const original = {
   direction: "inbound" as const,
   folder: "inbox" as const,
   fromAddress: "sender@example.com",
+  fromName: "Sender",
   to: ["support@example.com"],
   cc: [],
   bcc: [],
@@ -51,9 +64,11 @@ const original = {
 const mailbox = {
   id: "mailbox-1",
   address: "support@example.com",
+  deletedAt: null,
   displayName: "Support",
+  kind: "human" as const,
   isActive: true,
-  addresses: [],
+  mailDomainId: "domain-1",
   createdAt: "2026-07-29T12:00:00.000Z",
   updatedAt: "2026-07-29T12:00:00.000Z"
 };
@@ -64,6 +79,7 @@ const sent = {
   direction: "outbound" as const,
   folder: "sent" as const,
   fromAddress: mailbox.address,
+  fromName: mailbox.displayName,
   to: ["recipient@example.com"],
   subject: "Fwd: Original",
   snippet: "Forwarded",
@@ -86,6 +102,7 @@ describe("forward service", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(getMessageDetail).mockResolvedValue(original);
+    vi.mocked(getMessageHtmlKey).mockResolvedValue(null);
     vi.mocked(findMailboxForSending).mockResolvedValue(mailbox);
     vi.mocked(sendNewMessage).mockResolvedValue(sent);
   });
@@ -114,12 +131,106 @@ describe("forward service", () => {
         attachmentIds: [],
         from: mailbox.address,
         subject: "Fwd: Original",
-        text: expect.stringContaining("---------- Forwarded message ---------"),
+        text: "Please review",
         to: ["recipient@example.com"]
       }),
-      "user-1"
+      "user-1",
+      undefined,
+      expect.objectContaining({
+        text: expect.stringContaining("---------- Forwarded message ---------")
+      }),
+      [],
+      expect.objectContaining({ id: expect.any(String), hash: expect.any(String) })
     );
     expect(saveDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not copy inline message images as forwarded attachments", async () => {
+    vi.mocked(getMessageDetail).mockResolvedValue({
+      ...original,
+      attachments: [
+        {
+          id: "inline-logo",
+          messageId: original.id,
+          filename: "logo.png",
+          contentType: "image/png",
+          sizeBytes: 4,
+          contentId: "logo@example.com",
+          disposition: "inline",
+          r2Key: "mail/logo.png",
+          createdAt: original.createdAt
+        }
+      ]
+    });
+
+    await forwardMessage(
+      env,
+      {
+        messageId: original.id,
+        from: mailbox.address,
+        to: ["recipient@example.com"],
+        cc: [],
+        bcc: [],
+        text: "Please review",
+        attachmentIds: [],
+        includeOriginalAttachments: true
+      },
+      "user-1"
+    );
+
+    expect(saveDraft).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(sendNewMessage).toHaveBeenCalledWith(
+      env,
+      expect.objectContaining({ attachmentIds: [] }),
+      "user-1",
+      undefined,
+      expect.any(Object),
+      [],
+      expect.objectContaining({ id: expect.any(String), hash: expect.any(String) })
+    );
+  });
+
+  it("rejects a disabled mailbox before creating an attachment draft", async () => {
+    vi.mocked(findMailboxForSending).mockResolvedValue({ ...mailbox, isActive: false });
+    vi.mocked(getMessageDetail).mockResolvedValue({
+      ...original,
+      attachments: [
+        {
+          id: "attachment-1",
+          messageId: original.id,
+          filename: "original.txt",
+          contentType: "text/plain",
+          sizeBytes: 8,
+          contentId: null,
+          disposition: "attachment",
+          r2Key: "mail/original.txt",
+          createdAt: original.createdAt
+        }
+      ],
+      hasAttachments: true
+    });
+
+    await expect(
+      forwardMessage(
+        env,
+        {
+          messageId: original.id,
+          from: mailbox.address,
+          to: ["recipient@example.com"],
+          cc: [],
+          bcc: [],
+          text: "",
+          attachmentIds: [],
+          includeOriginalAttachments: true
+        },
+        "user-1"
+      )
+    ).rejects.toMatchObject({ code: "MAILBOX_DISABLED", status: 400 });
+
+    expect(saveDraft).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(sendNewMessage).not.toHaveBeenCalled();
   });
 
   it("copies original attachments through a temporary draft before sending", async () => {
@@ -129,7 +240,8 @@ describe("forward service", () => {
       filename: "original.txt",
       contentType: "text/plain",
       sizeBytes: 8,
-      contentId: null,
+      contentId: "<gmail-file@example.net>",
+      disposition: "attachment" as const,
       r2Key: "mail/original.txt",
       createdAt: original.createdAt
     };
@@ -150,9 +262,11 @@ describe("forward service", () => {
       subject: "Fwd: Original",
       text: "Forwarded",
       html: "<blockquote>Forwarded</blockquote>",
+      signature: { mode: "none", id: null, name: "", html: "", text: "" },
       version: 1,
       updatedAt: original.createdAt,
-      attachments: []
+      attachments: [],
+      labels: []
     });
     get.mockResolvedValue({
       arrayBuffer: async () => new TextEncoder().encode("original").buffer
@@ -162,7 +276,8 @@ describe("forward service", () => {
         id: "attachment-copy",
         filename: "original.txt",
         contentType: "text/plain",
-        sizeBytes: 8
+        sizeBytes: 8,
+        inline: false
       },
       r2Key: "drafts/user-1/draft-forward/attachment-copy"
     });
@@ -190,11 +305,211 @@ describe("forward service", () => {
     expect(sendNewMessage).toHaveBeenCalledWith(
       env,
       expect.objectContaining({
-        attachmentIds: ["attachment-copy"],
-        draftId: "draft-forward"
+        attachmentIds: ["attachment-copy"]
       }),
+      "user-1",
+      undefined,
+      expect.objectContaining({
+        text: expect.stringContaining("---------- Forwarded message ---------")
+      }),
+      [],
+      expect.objectContaining({ id: expect.any(String), hash: expect.any(String) })
+    );
+    expect(vi.mocked(sendNewMessage).mock.calls[0]?.[1]).not.toHaveProperty("draftId");
+    expect(deleteDraft).toHaveBeenCalledWith(env.DB, env.MAIL_OBJECTS, "user-1", "draft-forward");
+  });
+
+  it("adds original attachments when the web UI sends a forward draft", async () => {
+    vi.mocked(getMessageDetail).mockResolvedValue({
+      ...original,
+      attachments: [
+        {
+          id: "attachment-1",
+          messageId: original.id,
+          filename: "original.txt",
+          contentType: "text/plain",
+          sizeBytes: 8,
+          contentId: null,
+          disposition: "attachment",
+          r2Key: "mail/original.txt",
+          createdAt: original.createdAt
+        }
+      ],
+      hasAttachments: true
+    });
+    get.mockResolvedValue({
+      arrayBuffer: async () => new TextEncoder().encode("original").buffer
+    });
+    vi.mocked(addDraftAttachment).mockResolvedValue({
+      attachment: {
+        id: "attachment-copy",
+        filename: "original.txt",
+        contentType: "text/plain",
+        sizeBytes: 8,
+        inline: false
+      },
+      r2Key: "drafts/user-1/draft-web/attachment-copy"
+    });
+
+    await sendForwardDraft(
+      env,
+      {
+        from: mailbox.address,
+        to: ["recipient@example.com"],
+        cc: [],
+        bcc: [],
+        subject: "Fwd: Original",
+        text: "Authored quote\n\n---------- Forwarded message ---------",
+        html: "<blockquote>Authored quote</blockquote><blockquote>Forwarded message</blockquote>",
+        attachmentIds: ["attachment-added"],
+        draftId: "draft-web"
+      },
+      "draft-web",
+      original.id,
       "user-1"
     );
-    expect(deleteDraft).not.toHaveBeenCalled();
+
+    expect(sendNewMessage).toHaveBeenCalledWith(
+      env,
+      expect.objectContaining({
+        attachmentIds: ["attachment-added", "attachment-copy"],
+        draftId: "draft-web",
+        text: "Authored quote",
+        html: "<blockquote>Authored quote</blockquote>"
+      }),
+      "user-1",
+      undefined,
+      expect.objectContaining({
+        text: expect.stringContaining("---------- Forwarded message ---------")
+      }),
+      [],
+      expect.objectContaining({ id: expect.any(String), hash: expect.any(String) })
+    );
+    expect(saveDraft).not.toHaveBeenCalled();
+    expect(removeDraftAttachment).not.toHaveBeenCalled();
+  });
+
+  it("keeps sanitized HTML images and referenced inline files in a forward", async () => {
+    const inlineAttachment = {
+      id: "inline-logo",
+      messageId: original.id,
+      filename: "logo.png",
+      contentType: "image/png",
+      sizeBytes: 4,
+      contentId: "logo@example.com",
+      disposition: "inline" as const,
+      r2Key: "mail/logo.png",
+      createdAt: original.createdAt
+    };
+    vi.mocked(getMessageDetail).mockResolvedValue({
+      ...original,
+      htmlAvailable: true,
+      attachments: [inlineAttachment]
+    });
+    vi.mocked(getMessageHtmlKey).mockResolvedValue("mail/message.html");
+    get.mockImplementation(async (key: string) =>
+      key === "mail/message.html"
+        ? {
+            text: async () =>
+              '<p>Original <img src="cid:logo@example.com"><img src="https://images.example.com/remote.png"></p>'
+          }
+        : {
+            arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer
+          }
+    );
+
+    await forwardMessage(
+      env,
+      {
+        messageId: original.id,
+        from: mailbox.address,
+        to: ["recipient@example.com"],
+        cc: [],
+        bcc: [],
+        text: "Please review",
+        attachmentIds: [],
+        includeOriginalAttachments: true
+      },
+      "user-1"
+    );
+
+    expect(sendNewMessage).toHaveBeenCalledWith(
+      env,
+      expect.any(Object),
+      "user-1",
+      undefined,
+      expect.objectContaining({
+        html: expect.stringContaining('src="https://images.example.com/remote.png"')
+      }),
+      [
+        expect.objectContaining({
+          contentId: "logo@example.com",
+          disposition: "inline",
+          filename: "logo.png"
+        })
+      ],
+      expect.objectContaining({ id: expect.any(String), hash: expect.any(String) })
+    );
+  });
+
+  it("removes copied attachments when a web forward draft is not sent", async () => {
+    vi.mocked(getMessageDetail).mockResolvedValue({
+      ...original,
+      attachments: [
+        {
+          id: "attachment-1",
+          messageId: original.id,
+          filename: "original.txt",
+          contentType: "text/plain",
+          sizeBytes: 8,
+          contentId: null,
+          disposition: "attachment",
+          r2Key: "mail/original.txt",
+          createdAt: original.createdAt
+        }
+      ],
+      hasAttachments: true
+    });
+    get.mockResolvedValue({
+      arrayBuffer: async () => new TextEncoder().encode("original").buffer
+    });
+    vi.mocked(addDraftAttachment).mockResolvedValue({
+      attachment: {
+        id: "attachment-copy",
+        filename: "original.txt",
+        contentType: "text/plain",
+        sizeBytes: 8,
+        inline: false
+      },
+      r2Key: "drafts/user-1/draft-web/attachment-copy"
+    });
+    vi.mocked(sendNewMessage).mockRejectedValueOnce(new Error("Delivery failed."));
+
+    await expect(
+      sendForwardDraft(
+        env,
+        {
+          from: mailbox.address,
+          to: ["recipient@example.com"],
+          cc: [],
+          bcc: [],
+          subject: "Fwd: Original",
+          text: "---------- Forwarded message ---------",
+          attachmentIds: [],
+          draftId: "draft-web"
+        },
+        "draft-web",
+        original.id,
+        "user-1"
+      )
+    ).rejects.toThrow("Delivery failed.");
+
+    expect(removeDraftAttachment).toHaveBeenCalledWith(
+      env.DB,
+      env.MAIL_OBJECTS,
+      "user-1",
+      "draft-web",
+      "attachment-copy"
+    );
   });
 });

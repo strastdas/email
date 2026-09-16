@@ -1,11 +1,13 @@
+import { splitQuotedText } from "../../../shared/message-quote";
 import type { MessageDetail } from "../messages/types";
+import { assembleMessageBody } from "./body";
 
 const maxQuotedCharacters = 100_000;
 const truncationNotice = "[Previous message truncated by HQBase]";
 
 type ReplySource = Pick<
   MessageDetail,
-  "createdAt" | "fromAddress" | "receivedAt" | "sentAt" | "snippet" | "textBody"
+  "createdAt" | "fromAddress" | "fromName" | "receivedAt" | "sentAt" | "snippet" | "textBody"
 >;
 
 export function buildReplyBody(
@@ -13,24 +15,108 @@ export function buildReplyBody(
   original: ReplySource,
   richQuoteHtml?: string
 ): { html?: string | undefined; text: string } {
+  const context = buildReplyContext(
+    original,
+    richQuoteHtml,
+    maxQuotedCharacters - authored.text.trim().length - 2
+  );
+  return assembleMessageBody({
+    authored,
+    context: authored.html ? context : { text: context.text }
+  });
+}
+
+export function buildReplyContext(
+  original: ReplySource,
+  richQuoteHtml?: string,
+  maxTextLength = maxQuotedCharacters
+): { html: string; text: string } {
   const attribution = `On ${formatTimestamp(
     original.receivedAt ?? original.sentAt ?? original.createdAt
-  )}, ${original.fromAddress} wrote:`;
-  const quoted = boundedQuoteSource(original.textBody || original.snippet);
-  const text = `${authored.text.trimEnd()}\n\n${attribution}\n${quotePlainText(quoted)}`;
-
-  if (!authored.html) return { text };
-
+  )}, ${senderLabel(original)} wrote:`;
+  const source = original.textBody || original.snippet;
+  let sourceLimit = Math.max(
+    0,
+    Math.min(maxQuotedCharacters, maxTextLength - attribution.length - 2)
+  );
+  let quoted = boundedQuoteSource(source, sourceLimit);
+  let text = `${attribution}\n${quotePlainText(quoted)}`;
+  while (text.length > maxTextLength && sourceLimit > 0) {
+    sourceLimit = Math.max(0, sourceLimit - (text.length - maxTextLength) - 1);
+    quoted = boundedQuoteSource(source, sourceLimit);
+    text = `${attribution}\n${quotePlainText(quoted)}`;
+  }
   return {
     text,
-    html: `${authored.html.trimEnd()}${quoteHtml(attribution, richQuoteHtml ?? plainTextHtml(quoted))}`
+    html: quoteHtml(attribution, richQuoteHtml ?? plainTextHtml(quoted))
   };
 }
 
-function boundedQuoteSource(value: string): string {
+export function buildReplyChainContext(
+  messages: ReplySource[],
+  richLatestHtml?: string,
+  maxTextLength = maxQuotedCharacters
+): { html: string; text: string } {
+  const oldest = messages[0];
+  const latest = messages.at(-1);
+  if (!oldest || !latest) throw new Error("A reply chain needs at least one message.");
+
+  let nestedText = messageText(oldest);
+  let nestedHtml =
+    messages.length === 1 && richLatestHtml ? richLatestHtml : plainTextHtml(nestedText);
+  for (let index = 1; index < messages.length; index += 1) {
+    const current = messages[index];
+    const previous = messages[index - 1];
+    if (!current || !previous) continue;
+    const currentText = authoredMessageText(current);
+    const attribution = replyAttribution(previous);
+    nestedText = joinText(currentText, `${attribution}\n${quotePlainText(nestedText)}`);
+    nestedHtml = joinHtml(
+      index === messages.length - 1 && richLatestHtml ? richLatestHtml : plainTextHtml(currentText),
+      quoteHtml(attribution, nestedHtml)
+    );
+  }
+
+  return buildReplyContext(
+    { ...latest, snippet: nestedText, textBody: nestedText },
+    nestedHtml,
+    maxTextLength
+  );
+}
+
+function messageText(message: ReplySource): string {
+  return (message.textBody || message.snippet).replace(/\r\n?/g, "\n").trim();
+}
+
+function authoredMessageText(message: ReplySource): string {
+  const source = messageText(message);
+  const parts = splitQuotedText(source);
+  return joinText(parts.body, parts.afterQuote ?? "") || source;
+}
+
+function joinText(...parts: string[]): string {
+  return parts.filter((part) => part.trim()).join("\n\n");
+}
+
+function joinHtml(...parts: string[]): string {
+  return parts.filter(Boolean).join("<br><br>");
+}
+
+function replyAttribution(message: ReplySource): string {
+  return `On ${formatTimestamp(
+    message.receivedAt ?? message.sentAt ?? message.createdAt
+  )}, ${senderLabel(message)} wrote:`;
+}
+
+function senderLabel(message: Pick<ReplySource, "fromAddress" | "fromName">): string {
+  return message.fromName ? `${message.fromName} <${message.fromAddress}>` : message.fromAddress;
+}
+
+function boundedQuoteSource(value: string, limit = maxQuotedCharacters): string {
   const normalized = value.replace(/\r\n?/g, "\n").trim();
-  if (normalized.length <= maxQuotedCharacters) return normalized;
-  return `${normalized.slice(0, maxQuotedCharacters).trimEnd()}\n\n${truncationNotice}`;
+  if (normalized.length <= limit) return normalized;
+  if (limit <= truncationNotice.length) return truncationNotice.slice(0, limit);
+  return `${normalized.slice(0, limit - truncationNotice.length - 2).trimEnd()}\n\n${truncationNotice}`;
 }
 
 function quotePlainText(value: string): string {

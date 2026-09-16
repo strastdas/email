@@ -1,3 +1,4 @@
+import { applyMigrationPhase } from "../d1-migrations.mjs";
 import { optionalBoolean, requireString } from "./args.mjs";
 import { run } from "./command.mjs";
 import { writeWranglerConfig } from "./config.mjs";
@@ -16,14 +17,17 @@ export function reset(flags) {
   }
 
   const manifest = loadManifest(name);
+  const environment = manifest.accountId
+    ? { CLOUDFLARE_ACCOUNT_ID: manifest.accountId }
+    : undefined;
   if (scope === "data" || scope === "all") {
-    resetData(manifest, { dryRun });
+    resetData(manifest, { dryRun, env: environment });
   }
   if (scope === "storage" || scope === "all") {
-    resetStorage(manifest, { dryRun });
+    resetStorage(manifest, { dryRun, env: environment });
   }
   if (scope === "domain" || scope === "all") {
-    resetDomain(manifest, { dryRun });
+    resetDomain(manifest, { dryRun, env: environment });
   }
 
   writeManifest(manifest, { dryRun });
@@ -47,21 +51,13 @@ function resetData(manifest, options) {
     ],
     options
   );
-  run(
-    "pnpm",
-    [
-      "exec",
-      "wrangler",
-      "d1",
-      "migrations",
-      "apply",
-      manifest.d1.name,
-      "--remote",
-      "--config",
-      configPath(manifest.name)
-    ],
-    options
-  );
+  const migrationOptions = {
+    configFile: configPath(manifest.name),
+    target: "remote",
+    run: (command, args) => run(command, args, options)
+  };
+  applyMigrationPhase(rootPath(), "normal", migrationOptions);
+  applyMigrationPhase(rootPath(), "after-deploy", migrationOptions);
 }
 
 function resetStorage(manifest, options) {
