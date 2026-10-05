@@ -1,9 +1,12 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  # Disabled in this fork: automatic runs are not wanted here. Restore the
+  # push and pull_request triggers to run this quality gate again.
+  # pull_request:
+  # push:
+  #   branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
