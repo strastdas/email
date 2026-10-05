@@ -2,8 +2,12 @@ name: Publish Nightly candidate
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * *"
+  # Disabled in this fork: the release pipeline publishes to the canonical
+  # HQBase/hqbase repository and needs release tags, environments, and signing
+  # secrets that do not exist here. Restore the schedule only after the fork
+  # owns those resources.
+  # schedule:
+  #   - cron: "0 6 * * *"
 
 permissions:
   contents: read
